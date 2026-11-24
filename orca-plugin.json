@@ -1,0 +1,112 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "id": "pod",
+  "name": "Pod",
+  "version": "0.1.0",
+  "author": { "name": "mrksoftware", "url": "https://github.com/mrksoftware" },
+  "repository": "https://github.com/mrksoftware/orca-pod",
+  "homepage": "https://github.com/mrksoftware/orca-pod",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "cover": { "path": "images/cover.png", "alt": "Pod's board: queued, running, waiting-for-you and done columns with animated agent cards" },
+  "screenshots": [
+    { "path": "images/board-dark.png", "alt": "The agent board in the dark theme", "caption": "Every agent at a glance: queued, running, waiting for you, done", "theme": "dark" },
+    { "path": "images/board-light.png", "alt": "The agent board in the light theme", "caption": "Each project, folder and bot has its own colour", "theme": "light" },
+    { "path": "images/detail-dark.png", "alt": "A task's detail with the agent's question, timeline and terminal", "caption": "Ctrl+Click a card to answer the agent without leaving the board", "theme": "dark" }
+  ],
+  "description": "Agent queue: dictate or type a task, Pod hands it to an agent (new worktree, folder or bot) and shows at a glance what is queued, running, waiting for you or done. English, Italian, Spanish.",
+  "engines": {
+    "orca": ">=1.4.259"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "pod",
+        "title": "Pod",
+        "icon": "layers",
+        "entry": "src/panel.html",
+        "ui": "html"
+      }
+    ],
+    "commands": [
+      {
+        "id": "pod.focusWaiting",
+        "title": "Pod: go to the first agent waiting for you"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "pod-status",
+        "text": "pod",
+        "icon": "layers",
+        "tooltip": "Pod: agent queue",
+        "command": "pod.focusWaiting"
+      }
+    ],
+    "events": [
+      { "on": "agent.status.changed" },
+      { "on": "workspace.removed" }
+    ],
+    "settings": [
+      {
+        "key": "language",
+        "title": "Language",
+        "description": "Language of the Pod panel, notifications and status bar.",
+        "type": "string",
+        "default": "en",
+        "enum": ["en", "it", "es"],
+        "enumLabels": ["English", "Italiano", "Español"]
+      },
+      {
+        "key": "defaultAgent",
+        "title": "Default agent",
+        "description": "Agent used for new tasks when you do not pick one.",
+        "type": "string",
+        "default": "claude",
+        "enum": ["claude", "codex"],
+        "enumLabels": ["Claude", "Codex"]
+      },
+      {
+        "key": "maxParallel",
+        "title": "Agents in parallel",
+        "description": "How many Pod tasks can run at the same time; the others stay queued. 0 = no limit.",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "maximum": 50
+      },
+      {
+        "key": "showOrcaAgents",
+        "title": "Also show agents opened in Orca",
+        "description": "Bring agents started directly in Orca onto the board, not only those launched by Pod. They do not take a parallel slot.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "doneVisible",
+        "title": "Done tasks shown",
+        "description": "How many done tasks stay on the board.",
+        "type": "integer",
+        "default": 6,
+        "minimum": 1,
+        "maximum": 30
+      }
+    ]
+  },
+  "capabilities": [
+    { "kind": "storage:own" },
+    { "kind": "settings:own" },
+    { "kind": "workspace:read" },
+    { "kind": "workspace:write" },
+    { "kind": "workspace:create" },
+    { "kind": "agent:read" },
+    { "kind": "agent:launch" },
+    { "kind": "terminal:read" },
+    { "kind": "terminal:send" },
+    { "kind": "notifications:show" }
+  ]
+}

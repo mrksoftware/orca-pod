@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pod · Agent Queue</title>
+<link rel="stylesheet" href="./panel.css">
+</head>
+<body>
+<!-- Static text carries i18n keys (src/i18n.js): data-i18n sets the text, data-i18n-ph the
+     placeholder, data-i18n-aria the aria-label, data-i18n-title the tooltip. -->
+<div class="aq" id="root">
+
+<header class="top" id="top">
+  <div class="bar">
+    <div class="brand">
+      <h1 class="wm">pod</h1>
+      <span class="label">agent queue</span>
+    </div>
+    <div class="bar-r">
+      <span class="live"><span class="live-dot" aria-hidden="true"></span><span id="live-text">…</span></span>
+      <div class="lang" id="lang" role="radiogroup" data-i18n-aria="lang.title">
+        <button role="radio" data-lang="en" aria-checked="true">EN</button>
+        <button role="radio" data-lang="it" aria-checked="false">IT</button>
+        <button role="radio" data-lang="es" aria-checked="false">ES</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="composer">
+    <div class="field" id="field">
+      <label for="aq-input" class="sr" data-i18n="composer.sr">New task for the agent</label>
+      <textarea id="aq-input" rows="1" autocomplete="off" data-i18n-ph="composer.placeholder" data-i18n-title="detail.hint" placeholder="What should the agent do?"></textarea>
+      <span class="rec" id="rec" hidden aria-hidden="true">
+        <span class="rec-l" data-i18n="composer.listening">Listening</span>
+        <span class="wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></span>
+      </span>
+    </div>
+    <div class="composer-row">
+      <label for="aq-project" class="sr" data-i18n="composer.target">Project or bot</label>
+      <select id="aq-project" class="sel sel--project"></select>
+      <label for="aq-agent" class="sr" data-i18n="composer.agent">Agent</label>
+      <select id="aq-agent" class="sel">
+        <option value="claude">Claude</option>
+        <option value="codex">Codex</option>
+      </select>
+      <span class="tipwrap">
+        <button class="mic" id="mic" aria-label="Dictate with the microphone" aria-pressed="false">
+          <svg class="ic ic-mic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><path d="M12 19v3"></path></svg>
+          <svg class="ic ic-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>
+        </button>
+        <span class="tip" id="mic-tip" role="tooltip"></span>
+      </span>
+      <button class="add" id="add">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>
+        <span class="add-l" data-i18n="add">Add</span>
+      </button>
+    </div>
+  </div>
+  <div class="banner" id="banner" hidden></div>
+</header>
+
+<div class="main">
+  <div class="content">
+    <div class="flow" id="flow">
+      <section class="col st st--queued col--queued" data-col="queued" data-i18n-aria="state.queued">
+        <div class="col-h"><span class="col-dot"></span><h2 class="col-title" data-i18n="state.queued">Queued</h2><span class="col-sub" data-i18n="col.queuedSub">kanban</span><span class="col-count" data-count="queued">0</span></div>
+        <div class="lanes"><div class="lane lane--plain"><div class="list" data-list="queued"></div><div class="empty" data-empty="queued" data-i18n="empty.queued">No tasks queued</div></div></div>
+      </section>
+
+      <section class="col st st--running col--running" data-col="running" data-i18n-aria="state.running">
+        <div class="col-h"><span class="col-dot"></span><h2 class="col-title" data-i18n="state.running">Running</h2><span class="par" data-i18n-title="par.title">
+          <button class="par-btn" id="par-dec" data-i18n-aria="par.dec">−</button>
+          <span class="par-v" id="sub-running">∞</span>
+          <button class="par-btn" id="par-inc" data-i18n-aria="par.inc">+</button>
+        </span><span class="col-count" data-count="running">0</span></div>
+        <div class="lanes">
+          <div class="lane lane--agent" data-lane="claude">
+            <div class="agent-node">
+              <span class="agent-ic" data-logo="claude"></span>
+              <span class="agent-n">Claude</span><span class="agent-s" data-lane-status="claude"></span>
+            </div>
+            <div><div class="list" data-list="running:claude"></div><div class="lane-empty" data-empty="running:claude" data-i18n="lane.free">Free, waiting for a task</div></div>
+          </div>
+          <div class="lane lane--agent" data-lane="codex">
+            <div class="agent-node">
+              <span class="agent-ic" data-logo="codex"></span>
+              <span class="agent-n">Codex</span><span class="agent-s" data-lane-status="codex"></span>
+            </div>
+            <div><div class="list" data-list="running:codex"></div><div class="lane-empty" data-empty="running:codex" data-i18n="lane.free">Free, waiting for a task</div></div>
+          </div>
+          <div class="lane lane--agent" data-lane="other" hidden>
+            <div class="agent-node">
+              <span class="agent-ic"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"></path><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M9 13v2M15 13v2"></path></svg></span>
+              <span class="agent-n" data-i18n="lane.other">Others</span><span class="agent-s" data-lane-status="other"></span>
+            </div>
+            <div><div class="list" data-list="running:other"></div><div class="lane-empty" data-empty="running:other" data-i18n="lane.otherEmpty">No other agents</div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="col st st--waiting col--waiting" data-col="waiting" data-i18n-aria="state.waiting">
+        <div class="col-h"><span class="col-dot"></span><h2 class="col-title" data-i18n="state.waiting">Waiting for you</h2><span class="col-sub" data-i18n="col.waitingSub">needs your answer</span><span class="col-count" data-count="waiting">0</span></div>
+        <div class="lanes"><div class="lane lane--plain"><div class="list" data-list="waiting"></div><div class="empty" data-empty="waiting" data-i18n="empty.waiting">Nothing to approve</div></div></div>
+      </section>
+
+      <section class="col st st--done col--done" data-col="done" data-i18n-aria="col.done">
+        <div class="col-h"><span class="col-dot"></span><h2 class="col-title" data-i18n="col.done">Done</h2><button class="clear-all" id="clear-all" hidden data-i18n="clearAll" data-i18n-title="clearAll.title">Clear all</button><span class="col-count" data-count="done">0</span></div>
+        <div class="lanes"><div class="lane lane--plain"><div class="list" data-list="done"></div><div class="empty" data-empty="done" data-i18n="empty.done">Nothing done yet</div></div></div>
+      </section>
+
+      <div class="pipe pipe--h p-assign" data-edge="assign" aria-hidden="true">
+        <span class="pipe-line"></span><span class="pipe-lbl" data-i18n="pipe.assign">assign</span>
+        <svg class="pipe-head" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg><span class="tok"></span>
+      </div>
+      <div class="vpipes" aria-hidden="true">
+        <div class="pipe pipe--v p-ask" data-edge="ask">
+          <span class="pipe-line"></span><span class="pipe-lbl" data-i18n="pipe.ask">asks for input</span>
+          <svg class="pipe-head" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg><span class="tok"></span>
+        </div>
+        <div class="pipe pipe--v pipe--up p-reply" data-edge="reply">
+          <span class="pipe-line"></span><span class="pipe-lbl" data-i18n="pipe.reply">reply</span>
+          <svg class="pipe-head" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg><span class="tok"></span>
+        </div>
+      </div>
+      <div class="pipe pipe--h p-complete" data-edge="complete" aria-hidden="true">
+        <span class="pipe-line"></span><span class="pipe-lbl" data-i18n="pipe.complete">complete</span>
+        <svg class="pipe-head" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg><span class="tok"></span>
+      </div>
+    </div>
+  </div>
+
+  <aside class="panel" id="panel" hidden data-i18n-aria="detail.aria">
+    <button class="resizer" id="resizer" data-i18n-aria="detail.resize"></button>
+    <div class="tabs">
+      <div class="tab-strip" id="tabs" role="tablist" data-i18n-aria="detail.tabs"></div>
+      <button class="icon-btn" id="open-orca" data-i18n-aria="detail.openOrca" data-i18n-title="detail.openOrcaTitle"><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"></path><path d="M10 14 21 3"></path><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path></svg></button>
+      <button class="icon-btn" id="close-panel" data-i18n-aria="detail.close"><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button>
+    </div>
+    <div class="panel-body">
+      <div class="detail">
+        <div class="d-head">
+          <span class="pill" id="d-pill"></span>
+          <h2 class="d-title" id="d-title"></h2>
+          <div class="d-meta">
+            <span><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"></path><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M9 13v2M15 13v2"></path></svg><span id="d-agent"></span></span>
+            <span id="d-place"></span>
+            <span class="src" id="d-source"></span>
+            <span class="mono"><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span id="d-branch"></span></span>
+            <span class="mono"><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg><span id="d-elapsed"></span></span>
+          </div>
+        </div>
+
+        <div class="ask" id="d-ask" hidden>
+          <span class="label" id="d-ask-label"></span>
+          <p id="d-question"></p>
+          <label for="d-reply" class="sr" data-i18n="detail.replySr">Reply to the agent</label>
+          <textarea id="d-reply"></textarea>
+          <div class="ask-row">
+            <span class="hint" data-i18n="detail.hint">Enter to send · Shift+Enter for a new line</span>
+            <button class="send" id="d-send" disabled><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></svg><span data-i18n="detail.send">Send</span></button>
+          </div>
+        </div>
+
+        <div class="err" id="d-err" hidden>
+          <span class="label" data-i18n="detail.failed">Launch failed</span>
+          <p id="d-err-text"></p>
+          <div class="ask-row"><span></span><button class="send" id="d-retry" data-i18n="detail.retry">Retry</button></div>
+        </div>
+
+        <div class="sec">
+          <h3 class="label" data-i18n="detail.timeline">Timeline</h3>
+          <div class="box tl" id="d-timeline"></div>
+        </div>
+        <div class="sec">
+          <h3 class="label" data-i18n="detail.terminal">Terminal</h3>
+          <div class="term" id="d-term" role="log" data-i18n-aria="detail.termAria">
+            <div class="term-h"><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></svg><span id="d-term-title"></span></div>
+            <div id="d-term-lines"></div>
+            <span class="cursor" id="d-cursor" aria-hidden="true"></span>
+          </div>
+        </div>
+        <div class="d-actions">
+          <button class="ghost" id="d-focus" data-i18n="detail.focus">Open in Orca</button>
+          <button class="ghost ghost--danger" id="d-remove" data-i18n="detail.remove">Remove from board</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+</div>
+<script type="module" src="./panel.js"></script>
+</body>
+</html>

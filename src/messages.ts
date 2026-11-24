@@ -1,0 +1,130 @@
+// Worker strings: timeline notes, the card's last line, notifications, status bar, errors. They are
+// written in the language selected when they happen (stored notes keep that language).
+export type Lang = 'en' | 'it' | 'es'
+export const LANGS: Lang[] = ['en', 'it', 'es']
+
+const en = {
+  'limit.q': 'Stopped by the usage limit. It resets {reset}',
+  'limit.qNoReset': 'Stopped by the usage limit',
+  'note.limit': 'usage limit reached',
+  'note.start': 'starting {agent}',
+  'note.startIn': 'starting {agent} in {place}',
+  'note.failed': 'launch failed',
+  'note.resumed': 'resumed',
+  'note.afterReply': 'after your reply',
+  'note.retry': 'retry',
+  'note.openedOrca': 'opened in Orca',
+  'note.closedOrca': 'closed in Orca',
+  'last.waitingAgent': 'Waiting for a free agent…',
+  'last.creatingWt': 'Creating worktree {branch}…',
+  'last.startedWt': '{agent} started in the worktree',
+  'last.starting': 'Starting {agent} in {place}…',
+  'last.startedIn': '{agent} started in {place}',
+  'q.failed': 'Launch failed: {e}',
+  'note.sentBot': 'sent to {bot}',
+  'last.sendingBot': 'Sending to {bot}…',
+  'last.sentBot': "In {bot}'s Home Chat, waiting for the bot to pick it up",
+  'last.botWorking': '{bot} is working on it',
+  'last.working': '{agent} is working…',
+  'notif.waiting': 'The agent is waiting for your answer',
+  'status.running': '{n} running',
+  'status.waiting': '{n} waiting for you',
+  'status.queued': '{n} queued',
+  'status.tipWaiting': 'Pod: click to go to the first agent waiting for you',
+  'status.tip': 'Pod: agent queue',
+  'cmd.none': 'No agent is waiting for you',
+  'cmd.opened': 'Opened: {title}',
+  'err.empty': 'Empty task',
+  'err.notFound': 'Task not found',
+  'err.target': 'Project or bot not found',
+  'err.chat': 'This agent is a chat: open it in Orca to reply',
+  'err.interrupted': 'interrupted by a Pod restart before it finished. Press Retry',
+}
+type Key = keyof typeof en
+
+const it: Record<Key, string> = {
+  'limit.q': 'Fermo per il limite di utilizzo. Si azzera {reset}',
+  'limit.qNoReset': 'Fermo per il limite di utilizzo',
+  'note.limit': 'limite di utilizzo raggiunto',
+  'note.start': 'avvio {agent}',
+  'note.startIn': 'avvio {agent} in {place}',
+  'note.failed': 'avvio fallito',
+  'note.resumed': 'ripreso',
+  'note.afterReply': 'dopo tua risposta',
+  'note.retry': 'riprova',
+  'note.openedOrca': 'aperto da Orca',
+  'note.closedOrca': 'chiuso in Orca',
+  'last.waitingAgent': 'In attesa di un agente libero…',
+  'last.creatingWt': 'Creo il worktree {branch}…',
+  'last.startedWt': '{agent} avviato nel worktree',
+  'last.starting': 'Avvio {agent} in {place}…',
+  'last.startedIn': '{agent} avviato in {place}',
+  'q.failed': 'Avvio fallito: {e}',
+  'note.sentBot': 'inviato a {bot}',
+  'last.sendingBot': 'Invio a {bot}…',
+  'last.sentBot': 'Nella Home Chat di {bot}, in attesa che il bot lo prenda',
+  'last.botWorking': '{bot} ci sta lavorando',
+  'last.working': '{agent} sta lavorando…',
+  'notif.waiting': "L'agente aspetta una tua risposta",
+  'status.running': '{n} running',
+  'status.waiting': '{n} aspetta te',
+  'status.queued': '{n} in coda',
+  'status.tipWaiting': 'Pod: clicca per andare al primo agente che aspetta te',
+  'status.tip': 'Pod: agent queue',
+  'cmd.none': 'Nessun agente ti sta aspettando',
+  'cmd.opened': 'Aperto: {title}',
+  'err.empty': 'Task vuoto',
+  'err.notFound': 'Task non trovato',
+  'err.target': 'Progetto o bot non trovato',
+  'err.chat': 'Questo agente è una chat: aprilo in Orca per rispondere',
+  'err.interrupted': 'interrotto da un riavvio di Pod prima di finire. Premi Riprova',
+}
+
+const es: Record<Key, string> = {
+  'limit.q': 'Detenido por el límite de uso. Se restablece {reset}',
+  'limit.qNoReset': 'Detenido por el límite de uso',
+  'note.limit': 'límite de uso alcanzado',
+  'note.start': 'iniciando {agent}',
+  'note.startIn': 'iniciando {agent} en {place}',
+  'note.failed': 'error al iniciar',
+  'note.resumed': 'reanudado',
+  'note.afterReply': 'tras tu respuesta',
+  'note.retry': 'reintento',
+  'note.openedOrca': 'abierto desde Orca',
+  'note.closedOrca': 'cerrado en Orca',
+  'last.waitingAgent': 'Esperando un agente libre…',
+  'last.creatingWt': 'Creando el worktree {branch}…',
+  'last.startedWt': '{agent} iniciado en el worktree',
+  'last.starting': 'Iniciando {agent} en {place}…',
+  'last.startedIn': '{agent} iniciado en {place}',
+  'q.failed': 'Error al iniciar: {e}',
+  'note.sentBot': 'enviado a {bot}',
+  'last.sendingBot': 'Enviando a {bot}…',
+  'last.sentBot': 'En el Home Chat de {bot}, esperando a que el bot lo tome',
+  'last.botWorking': '{bot} está trabajando en ello',
+  'last.working': '{agent} está trabajando…',
+  'notif.waiting': 'El agente espera tu respuesta',
+  'status.running': '{n} en curso',
+  'status.waiting': '{n} esperándote',
+  'status.queued': '{n} en cola',
+  'status.tipWaiting': 'Pod: haz clic para ir al primer agente que te espera',
+  'status.tip': 'Pod: agent queue',
+  'cmd.none': 'Ningún agente te está esperando',
+  'cmd.opened': 'Abierto: {title}',
+  'err.empty': 'Tarea vacía',
+  'err.notFound': 'Tarea no encontrada',
+  'err.target': 'Proyecto o bot no encontrado',
+  'err.chat': 'Este agente es un chat: ábrelo en Orca para responder',
+  'err.interrupted': 'interrumpido por un reinicio de Pod antes de terminar. Pulsa Reintentar',
+}
+
+const STRINGS: Record<Lang, Record<Key, string>> = { en, it, es }
+
+export function translator(lang: string): (key: Key, vars?: Record<string, string | number>) => string {
+  const dict = STRINGS[(LANGS as string[]).includes(lang) ? (lang as Lang) : 'en']
+  return (key, vars) => {
+    let s = dict[key] ?? en[key]
+    if (vars) for (const k in vars) s = s.split('{' + k + '}').join(String(vars[k]))
+    return s
+  }
+}
