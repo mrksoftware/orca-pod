@@ -19,6 +19,14 @@ fly between columns as the agents work.
 - **Waiting for you means waiting for you.** Questions and permission prompts move a card to
   *Waiting for you* with a desktop notification. An agent stopped by its **usage limit** waits
   there too, with an hourglass and the reset time, instead of looking done.
+- **See what each agent is doing now.** Cards take the agent's tab title from Orca, show the
+  last request under it, and, while it runs, its latest action ("Editing panel.js", "Running the
+  unit tests", "Delegating: Explore repo"), read from Claude's transcript.
+- **Sub-agents.** Claude sub-agents at work show on the card ("2 sub-agents ···") and in the
+  detail, each with its state.
+- **Loops and schedules wait in Queued.** A Claude session that stops with a wake-up scheduled
+  (`/loop`, a cron job) goes back to *Queued* with the next run and a countdown; enabled Orca
+  automations wait there too, with their next run.
 - **Answer without leaving the board.** Ctrl+Click a card for its detail: the agent's question,
   a reply box (Enter sends, Shift+Enter for a new line), the timeline and the live terminal.
   A plain click takes you to the agent in Orca.
@@ -41,9 +49,11 @@ From Orca's plugin directory, or:
 orca plugin install mrksoftware/orca-pod
 ```
 
-Pod runs code, so Orca asks you to approve what it may do: read your projects, workspaces and
-terminals; create worktrees and start agents; type your replies into an agent's terminal; open
-workspaces and terminals; show notifications; keep its own storage and settings. To reach a bot's
+Pod runs code, so Orca asks you to approve what it may do: read your projects, workspaces,
+terminals and automations; create worktrees and start agents; type your replies into an agent's
+terminal; open workspaces and terminals; show notifications; keep its own storage and settings.
+It also reads Claude Code's transcripts under `~/.claude/projects` (read only) for titles,
+current actions, sub-agents and scheduled wake-ups. To reach a bot's
 chat it runs the `orca` CLI, from a quiet terminal titled "Pod" that it opens once in that bot's
 workspace (Orca only accepts mail from a terminal).
 

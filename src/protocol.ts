@@ -6,6 +6,9 @@ export type TaskState = 'queued' | 'running' | 'waiting' | 'done'
 
 export type TimelineEvent = { s: TaskState; at: number; note?: string }
 
+/** A Claude sub-agent (Task/Agent tool) of a session; `at` is when its transcript last changed. */
+export type SubAgent = { id: string; description: string; type: string; running: boolean; at: number }
+
 export type Task = {
   id: string
   /** `pod`: queued and launched by Pod. `orca`: an agent started in Orca directly, adopted by Pod. */
@@ -34,6 +37,9 @@ export type Task = {
   sentAt?: number
   /** True until the bot's chat is seen working after `sentAt`. */
   awaitPickup?: boolean
+  /** Orca's own session id (what `orca agent list` and `orca bot chats` use). `sessionId` may
+   *  instead hold the Claude conversation id, which is what plugin events and agents.list report. */
+  orcaSessionId?: string
   /** Orca session id: the only handle a chat agent has. */
   sessionId?: string | null
   branch?: string
@@ -42,6 +48,20 @@ export type Task = {
   last?: string
   /** What the agent is waiting for (waiting state). */
   question?: string
+  /** Set while the task waits for a scheduled run: back in Queued until then. `loop` and `cron`
+   *  are a Claude session's own wake-ups, `automation` an Orca automation's next run. */
+  wakeAt?: number
+  wakeKind?: 'loop' | 'cron' | 'automation'
+  /** The cron expression, the automation's schedule, or the loop's reason. */
+  wakeLabel?: string
+  /** The title of the agent's tab in Orca (Claude names its session), kept up to date. */
+  tabTitle?: string
+  /** What the agent is doing right now (its latest action), from Claude's transcript. */
+  activity?: string
+  /** The last thing the agent was asked, from Claude's transcript. */
+  prompt?: string
+  /** Claude sub-agents of this session's current work (read from Claude's transcripts on disk). */
+  subagents?: SubAgent[]
   /** Set while the agent is stopped by its usage limit: the reset time it gave, or ''. */
   limit?: string
   /** Why the launch failed. */

@@ -5,6 +5,17 @@ export const LANGS = ['en', 'it', 'es']
 export const SPEECH_LANG = { en: 'en-US', it: 'it-IT', es: 'es-ES' }
 
 const en = {
+  'wake.loop': 'Loop',
+  'wake.cron': 'Scheduled',
+  'wake.automation': 'Automation',
+  'wake.next': '{kind} · next run {at} ({in})',
+  'wake.in': 'in {t}',
+  'wake.due': 'due now',
+  'sub.one': '1 sub-agent',
+  'sub.many': '{n} sub-agents',
+  'sub.short': '{n} sub',
+  'sub.title': 'Sub-agents',
+  'sub.working': 'working',
   'badge.limit': 'Limit reached',
   'limit.resets': 'resets {t}',
   'owner.title': 'Worker started by the bot {bot}',
@@ -110,6 +121,17 @@ const en = {
 }
 
 const it = {
+  'wake.loop': 'Loop',
+  'wake.cron': 'Pianificato',
+  'wake.automation': 'Automazione',
+  'wake.next': '{kind} · prossima esecuzione {at} ({in})',
+  'wake.in': 'tra {t}',
+  'wake.due': 'a momenti',
+  'sub.one': '1 sotto-agente',
+  'sub.many': '{n} sotto-agenti',
+  'sub.short': '{n} sub',
+  'sub.title': 'Sotto-agenti',
+  'sub.working': 'al lavoro',
   'badge.limit': 'Limite raggiunto',
   'limit.resets': 'si azzera {t}',
   'owner.title': 'Worker lanciato dal bot {bot}',
@@ -215,6 +237,17 @@ const it = {
 }
 
 const es = {
+  'wake.loop': 'Bucle',
+  'wake.cron': 'Programado',
+  'wake.automation': 'Automatización',
+  'wake.next': '{kind} · próxima ejecución {at} ({in})',
+  'wake.in': 'en {t}',
+  'wake.due': 'en breve',
+  'sub.one': '1 subagente',
+  'sub.many': '{n} subagentes',
+  'sub.short': '{n} sub',
+  'sub.title': 'Subagentes',
+  'sub.working': 'trabajando',
   'badge.limit': 'Límite alcanzado',
   'limit.resets': 'se restablece {t}',
   'owner.title': 'Worker lanzado por el bot {bot}',

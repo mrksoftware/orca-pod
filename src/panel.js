@@ -48,7 +48,18 @@ const fmtClock = (t) => { const d = new Date(t); return pad(d.getHours()) + ':' 
 
 /** The card's timer. Queued and running tick. Done and waiting are frozen at how long the agent
  *  worked before it stopped; an agent adopted when already stopped shows the time it stopped. */
+/** A scheduled run's time: HH:MM today, else day/month HH:MM. */
+function fmtWake(at) {
+  const d = new Date(at)
+  const hm = pad(d.getHours()) + ':' + pad(d.getMinutes())
+  return d.toDateString() === new Date().toDateString() ? hm : pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + ' ' + hm
+}
+const untilText = (at) => (at - Date.now() > 30_000 ? T('wake.in', { t: fmtElapsed(at - Date.now()) }) : T('wake.due'))
+const isScheduled = (t) => t.state === 'queued' && !!t.wakeAt
+
 function timer(t) {
+  // scheduled: a countdown to the next run
+  if (isScheduled(t)) return { kind: 'live', text: untilText(t.wakeAt) }
   if (t.state === 'running' || t.state === 'queued') return { kind: 'live', text: fmtElapsed(Date.now() - t.since) }
   const tl = t.timeline || []
   for (let i = tl.length - 1; i >= 0; i--) {
@@ -97,6 +108,8 @@ const IC = {
   branch: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3v12"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>',
   bot: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"></path><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M9 13v2M15 13v2"></path></svg>',
   repo: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path></svg>',
+  subs: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5"></circle><circle cx="6" cy="19" r="2.5"></circle><circle cx="18" cy="12" r="2.5"></circle><path d="M6 7.5v9M6 12h9.5"></path></svg>',
+  alarm: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="13" r="8"></circle><path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3"></path></svg>',
   hourglass: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h12M6 22h12M7 2v4a5 5 0 0 0 10 0V2M7 22v-4a5 5 0 0 1 10 0v4"></path></svg>',
   chat: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>',
   term: '<svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 17 6-6-6-6"></path><path d="M12 19h8"></path></svg>',
@@ -115,7 +128,7 @@ function listKey(t) {
 }
 
 function cardSig(t) {
-  return [LANG, t.state, t.title, t.agent, t.branch || '', t.projectName, t.source, placeOf(t), modeOf(t), t.byBot || '', t.limit ?? '-', isError(t) ? 'e' : ''].join('|')
+  return [LANG, t.state, t.title, t.agent, t.branch || '', t.projectName, t.source, placeOf(t), modeOf(t), t.byBot || '', t.limit ?? '-', t.wakeAt || 0, t.wakeKind || '', runningSubs(t).map((s) => s.id + s.description).join(','), isError(t) ? 'e' : ''].join('|')
 }
 
 /** Where a task runs: a worktree of a Git project, a folder project's workspace, or a bot. */
@@ -136,6 +149,36 @@ function placeChip(t) {
   const tag = kind === 'bot' ? '<b>BOT</b>' : ''
   return '<span class="place place--' + kind + '" title="' + esc(T('place.' + kind) + ': ' + t.projectName) + '">' + icon + tag + '<span>' + esc(t.projectName) + '</span></span>'
 }
+/** Orca's own title is often generic ("Claude Code", the bot's or workspace's name): then the card
+ *  is titled by the last thing the agent was asked. */
+function isGenericTitle(t) {
+  const s = (t.title || '').trim().toLowerCase()
+  if (!s) return true
+  return [agentName(t.agent), 'claude code', 'claude', 'codex', t.projectName, t.bot, t.byBot].some((g) => g && s === String(g).trim().toLowerCase())
+}
+/** The card's title: the agent's tab title in Orca (Claude names its session), else Orca's own
+ *  title, else, when that is generic, the last thing the agent was asked. */
+const displayTitle = (t) => t.tabTitle || (t.prompt && isGenericTitle(t) ? t.prompt : t.title)
+/** Under the title, what you asked: the latest request (or, for a Pod task, the message you wrote),
+ *  when it differs from the title. */
+function askText(t) {
+  if (t.state === 'queued') return ''
+  const title = displayTitle(t)
+  const ask = t.prompt || (t.source === 'pod' ? t.title : '')
+  if (!ask) return ''
+  const same = (a, b) => a === b || b.startsWith(a.replace(/…$/, '')) || a.startsWith(b.replace(/…$/, ''))
+  return same(ask, title) ? '' : ask
+}
+
+/** Claude sub-agents working for this task right now: count, then what each one does. */
+const runningSubs = (t) => (t.subagents || []).filter((s) => s.running)
+function subsLine(t) {
+  const subs = runningSubs(t)
+  if (!subs.length || (t.state !== 'running' && t.state !== 'waiting')) return ''
+  const what = subs.map((s) => esc(s.description)).join(' · ')
+  return '<span class="c-subs" title="' + what + '">' + IC.subs + '<b>' + esc(T(subs.length === 1 ? 'sub.one' : 'sub.many', { n: subs.length })) + '</b><span class="c-subs-dots" aria-hidden="true"><i></i><i></i><i></i></span><span class="c-subs-what">' + what + '</span></span>'
+}
+
 /** For a bot's worker: which bot started it, in that bot's colour. */
 function ownerChip(t) {
   if (!t.byBot) return ''
@@ -156,7 +199,9 @@ function cardInner(t) {
   const lead = t.state === 'running'
     ? '<span class="c-orb' + (orbAgent ? ' c-orb--' + orbAgent : '') + '" aria-hidden="true">' + (orbAgent ? logo(orbAgent) : IC.bot) + '</span>'
     : t.state === 'done' ? IC.check : ''
-  const badge = t.state === 'waiting'
+  const badge = isScheduled(t)
+    ? '<span class="badge badge--wake" title="' + esc(T('wake.' + (t.wakeKind || 'cron')) + (t.wakeLabel ? ': ' + t.wakeLabel : '')) + '">' + IC.alarm + esc(fmtWake(t.wakeAt)) + '</span>'
+    : t.state === 'waiting'
     ? t.limit !== undefined && !err
       ? '<span class="badge badge--limit" title="' + esc(t.limit ? T('limit.resets', { t: t.limit }) : T('badge.limit')) + '">' + IC.hourglass + (t.limit ? esc(t.limit) : T('badge.limit')) + '</span>'
       : '<span class="badge"><span class="badge-dot"></span>' + (err ? T('badge.error') : T('badge.input')) + '</span>'
@@ -165,17 +210,22 @@ function cardInner(t) {
       : ''
   const branch = t.branch ? '<span class="c-branch">' + IC.branch + '<b>' + esc(t.branch) + '</b></span>' : ''
   return (
-    '<span class="c-top">' + lead + '<span class="c-title">' + esc(t.title) + '</span>' + badge + '</span>' +
+    '<span class="c-top">' + lead + '<span class="c-title" data-el="title"></span>' + badge + '</span>' +
+    '<span class="c-ask" data-el="ask"></span>' +
     '<span class="c-place">' + ownerChip(t) + placeChip(t) + srcChip(t) + '</span>' +
     '<span class="c-meta"><span class="c-agent">' + (IC[t.agent] || IC.bot) + esc(agentName(t.agent)) + modeIcon(t) + '</span>' + branch +
     '<span class="c-time">' + IC.clock + '<span data-el="time"></span></span></span>' +
+    subsLine(t) +
     '<span class="c-last" data-el="last"></span>' +
     (t.state === 'running' ? '<span class="ibar" aria-hidden="true"></span>' : '')
   )
 }
 
 function lastText(t) {
+  if (isScheduled(t)) return T('wake.next', { kind: T('wake.' + (t.wakeKind || 'cron')), at: fmtWake(t.wakeAt), in: untilText(t.wakeAt) })
   if (t.state === 'waiting') return t.question || t.last || ''
+  // running: what it is doing right now, when its transcript says
+  if (t.state === 'running' && t.activity) return t.activity
   return t.last || ''
 }
 
@@ -183,7 +233,7 @@ function updateCard(el, t) {
   const sig = cardSig(t)
   if (el._sig !== sig) {
     el._sig = sig
-    el.className = 'card card--' + t.state + (isError(t) ? ' card--error' : t.state === 'waiting' && t.limit !== undefined ? ' card--limit' : '')
+    el.className = 'card card--' + t.state + (isError(t) ? ' card--error' : t.state === 'waiting' && t.limit !== undefined ? ' card--limit' : isScheduled(t) ? ' card--scheduled' : '')
     el.style.setProperty('--ph', String(placeHue(t.projectName)))
     el.innerHTML = cardInner(t)
     el.setAttribute('aria-label', t.title + ', ' + stateLabel(t.state) + ', ' + agentName(t.agent) + '. ' + T('card.hint'))
@@ -192,6 +242,14 @@ function updateCard(el, t) {
   const last = lastText(t)
   const lastEl = el.querySelector('[data-el="last"]')
   if (lastEl && lastEl.textContent !== last) lastEl.textContent = last
+  lastEl?.classList.toggle('c-last--now', t.state === 'running' && !!t.activity)
+  // title and latest request change while the agent works: updated in place, no rebuild
+  const titleEl = el.querySelector('[data-el="title"]')
+  const title = displayTitle(t)
+  if (titleEl && titleEl.textContent !== title) { titleEl.textContent = title; titleEl.title = t.title }
+  const askEl = el.querySelector('[data-el="ask"]')
+  const ask = askText(t)
+  if (askEl && askEl.textContent !== ask) askEl.textContent = ask
   const time = el.querySelector('[data-el="time"]')
   if (time) time.textContent = timer(t).text
 }
@@ -268,7 +326,8 @@ function render(opts = {}) {
     const lane = $('[data-lane="' + a + '"]')
     lane.classList.toggle('is-busy', n > 0)
     if (a === 'other') lane.hidden = n === 0
-    $('[data-lane-status="' + a + '"]').textContent = n ? T('lane.busy', { n }) : T('lane.idle')
+    const subs = S.tasks.filter((t) => t.state === 'running' && listKey(t) === 'running:' + a).reduce((k, t) => k + runningSubs(t).length, 0)
+    $('[data-lane-status="' + a + '"]').textContent = n ? T('lane.busy', { n }) + (subs ? ' · ' + T('sub.short', { n: subs }) : '') : T('lane.idle')
   }
   for (const k in c) {
     const el = $('[data-count="' + k + '"]')
@@ -395,7 +454,8 @@ function renderPanel() {
 
   $('#tabs').innerHTML = S.tabs.map((id) => {
     const t = byId(id)
-    const title = t.title.length > 26 ? t.title.slice(0, 25) + '…' : t.title
+    const full = displayTitle(t)
+    const title = full.length > 26 ? full.slice(0, 25) + '…' : full
     return '<div class="tab' + (id === S.active ? ' is-active' : '') + '">' +
       '<button class="tab-btn" role="tab" aria-selected="' + (id === S.active) + '" title="' + esc(t.title) + '" data-tab="' + id + '"><span class="tdot tdot--' + t.state + '"></span><span>' + esc(title) + '</span></button>' +
       '<button class="tab-x" aria-label="' + esc(T('detail.closeTab', { title: t.title })) + '" data-close="' + id + '">' + IC.x + '</button></div>'
@@ -406,7 +466,11 @@ function renderPanel() {
   const pill = $('#d-pill')
   pill.className = 'pill pill--' + t.state
   pill.textContent = err ? T('badge.error') : t.state === 'waiting' && t.limit !== undefined ? T('badge.limit') : stateLabel(t.state)
-  $('#d-title').textContent = t.title
+  $('#d-title').textContent = displayTitle(t)
+  const lastAsk = askText(t)
+  $('#d-ask-now').hidden = !lastAsk && !(t.state === 'running' && t.activity)
+  $('#d-ask-now-q').textContent = lastAsk
+  $('#d-ask-now-a').textContent = t.state === 'running' && t.activity ? t.activity : ''
   $('#d-agent').textContent = agentName(t.agent)
   $('.detail').style.setProperty('--ph', String(placeHue(t.projectName)))
   $('#d-place').innerHTML = ownerChip(t) + placeChip(t) + modeIcon(t)
@@ -436,6 +500,15 @@ function renderPanel() {
   $('#d-timeline').innerHTML = t.timeline.map((ev, i) =>
     '<div class="tl-i tl--' + ev.s + (i === last ? ' is-cur' : '') + '"><span class="tl-dot" aria-hidden="true"></span><span>' + esc(stateLabel(ev.s)) +
     (ev.note ? ' <span class="tl-note">· ' + esc(ev.note) + '</span>' : '') + '</span><span class="tl-t">' + fmtClock(ev.at) + '</span></div>'
+  ).join('')
+
+  // Claude sub-agents of the current run: working ones spin, finished ones are checked.
+  const subs = t.subagents || []
+  $('#d-subs-sec').hidden = !subs.length
+  $('#d-subs').innerHTML = subs.map((s) =>
+    '<div class="sa' + (s.running ? ' sa--run' : '') + '">' + (s.running ? '<span class="sa-spin" aria-hidden="true"></span>' : IC.check) +
+    '<span class="sa-d">' + esc(s.description) + (s.type ? ' <span class="sa-t">' + esc(s.type) + '</span>' : '') + '</span>' +
+    '<span class="tl-t">' + (s.running ? T('sub.working') : fmtClock(s.at).slice(0, 5)) + '</span></div>'
   ).join('')
 
   $('#d-term-title').textContent = agentName(t.agent).toLowerCase() + ' · ' + (t.branch || t.projectName)

@@ -5,12 +5,14 @@
 // survive worker and Orca restarts.
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
-import type { PodState, Target, Task, TaskState } from './protocol'
+import type { PodState, SubAgent, Target, Task, TaskState } from './protocol'
 import { LANGS, translator } from './messages'
+
+type Wake = { at: number; kind: 'loop' | 'cron'; label: string }
 
 /** The Orca CLI. The plugin host API has no way to write into a chat, so messages for bots go
  *  through `orca orchestration send --to bot:<name>`, the documented way to reach a bot. On
@@ -84,6 +86,10 @@ const TASKS = 'tasks'
 const DISMISSED = 'dismissed'
 const LAST_TARGET = 'lastTargetId'
 const CLI_TIMEOUT_MS = 60_000
+/** How often the cards' tab titles are read again from Orca. */
+const TITLES_EVERY_MS = 15_000
+/** How often Orca's automations are read for their next runs. */
+const AUTOMATIONS_EVERY_MS = 60_000
 /** How long after a launch or a message an "idle" report is taken as "not started yet". */
 const PICKUP_GRACE_MS = 10 * 60_000
 /** How often `orca agent list` is read for the agents' last replies. */
@@ -113,6 +119,7 @@ type WorkspaceRow = {
   name: string
   project?: string | null
   projectId?: string | null
+  path?: string
   branch: string | null
   hostId: string | null
   status?: { state: string; lastActivityAt: number | null }
@@ -167,6 +174,325 @@ export function detectLimit(text: string): string | null {
   return m ? m[1].trim() : ''
 }
 
+/* ---------- Claude sub-agents ----------
+ * Claude Code keeps each session's transcript under ~/.claude/projects/<cwd>/<conversation id>.jsonl
+ * (<cwd> with every non-alphanumeric character turned into '-'), and each sub-agent it starts
+ * (Task / Agent tool) under <conversation id>/subagents/agent-<id>.jsonl, with a .meta.json beside
+ * it: { description, agentType, finished, ... }. Orca's API has no view of them; the files do. */
+
+/** A sub-agent whose transcript has not moved for this long is not running, whatever its meta says. */
+const SUBAGENT_FRESH_MS = 10 * 60_000
+
+export function claudeProjectDir(cwd: string, base = join(homedir(), '.claude', 'projects')): string {
+  return join(base, cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+}
+
+/** The sub-agents recorded in one session folder, newest first. */
+export async function readSubagents(sessionDir: string, now = Date.now()): Promise<SubAgent[]> {
+  const dir = join(sessionDir, 'subagents')
+  let names: string[]
+  try {
+    names = await readdir(dir)
+  } catch {
+    return []
+  }
+  const out: SubAgent[] = []
+  for (const n of names) {
+    if (!n.endsWith('.meta.json')) continue
+    const id = n.slice(0, -'.meta.json'.length)
+    try {
+      const meta = JSON.parse(await readFile(join(dir, n), 'utf8')) as { description?: string; agentType?: string; finished?: boolean }
+      let at = 0
+      try {
+        at = (await stat(join(dir, id + '.jsonl'))).mtimeMs
+      } catch {
+        at = (await stat(join(dir, n))).mtimeMs
+      }
+      out.push({
+        id,
+        description: String(meta.description || meta.agentType || id),
+        type: String(meta.agentType || ''),
+        // Claude writes `finished: true` only at the end; while it works the field is absent.
+        running: meta.finished !== true && now - at < SUBAGENT_FRESH_MS,
+        at,
+      })
+    } catch {
+      // a meta being written right now: next scan reads it
+    }
+  }
+  return out.sort((a, b) => b.at - a.at)
+}
+
+/** A session's folder: exact when the Claude conversation id is known (terminal agents report it),
+ *  else, for a chat, the most recently written session of its workspace. */
+export async function sessionDirFor(projectDir: string, conversationId: string | null | undefined, allowLatest: boolean): Promise<string | null> {
+  if (conversationId) {
+    // the transcript file always exists; the folder only once a sub-agent or tool result was saved
+    for (const p of [join(projectDir, conversationId + '.jsonl'), join(projectDir, conversationId)]) {
+      try {
+        await stat(p)
+        return join(projectDir, conversationId)
+      } catch {
+        // not there: try the next form, then fall through (a chat's Orca session id)
+      }
+    }
+  }
+  if (!allowLatest) return null
+  let names: string[]
+  try {
+    names = await readdir(projectDir)
+  } catch {
+    return null
+  }
+  let best: string | null = null
+  let bestAt = 0
+  for (const n of names) {
+    if (!n.endsWith('.jsonl')) continue
+    try {
+      const s = await stat(join(projectDir, n))
+      if (s.mtimeMs > bestAt) {
+        bestAt = s.mtimeMs
+        best = n.slice(0, -'.jsonl'.length)
+      }
+    } catch {
+      // gone meanwhile
+    }
+  }
+  return best ? join(projectDir, best) : null
+}
+
+/** What a Claude session is doing, read from the tail of its transcript: the last thing it was
+ *  asked (a bot's mail gives its Subject) and its latest action (the last tool it called, or that
+ *  it is writing). `act` is a kind plus a detail; the worker words it in the chosen language. */
+export type Activity = { prompt?: string; act?: { kind: string; detail: string }; at: number }
+
+const TAIL_BYTES = 512 * 1024
+const DEEP_TAIL_BYTES = 4 * 1024 * 1024
+const base = (p: unknown) => String(p ?? '').split(/[\\/]/).filter(Boolean).pop() ?? ''
+const oneLine = (s: unknown, n = 90) => {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim()
+  return t.length > n ? t.slice(0, n - 1) + '…' : t
+}
+
+/* ---------- schedules: Claude loops and cron jobs ---------- */
+
+/** The next time (ms) at or after `from` that a 5-field cron expression fires (minute hour
+ *  day-of-month month day-of-week; `*`, numbers, `a-b`, lists and `/n` steps), in local time, or
+ *  null when it does not fire within a year. */
+export function nextCron(expr: string, from: number): number | null {
+  const f = expr.trim().split(/\s+/)
+  if (f.length !== 5) return null
+  const field = (s: string, min: number, max: number): Set<number> | null => {
+    const out = new Set<number>()
+    for (const part of s.split(',')) {
+      const [range, stepS] = part.split('/')
+      const step = stepS ? Number(stepS) : 1
+      if (!Number.isFinite(step) || step < 1) return null
+      let a = min
+      let b = max
+      if (range !== '*') {
+        const [x, y] = range.split('-').map(Number)
+        if (!Number.isFinite(x)) return null
+        a = x
+        b = y === undefined || Number.isNaN(y) ? (stepS ? max : x) : y
+      }
+      for (let v = a; v <= b; v += step) out.add(v === 7 && max === 6 ? 0 : v)
+    }
+    return out
+  }
+  const [mi, ho, dom, mo, dow] = [field(f[0], 0, 59), field(f[1], 0, 23), field(f[2], 1, 31), field(f[3], 1, 12), field(f[4], 0, 6)]
+  if (!mi || !ho || !dom || !mo || !dow) return null
+  const domAny = f[2] === '*'
+  const dowAny = f[4] === '*'
+  const d = new Date(from)
+  d.setSeconds(0, 0)
+  if (d.getTime() < from) d.setMinutes(d.getMinutes() + 1)
+  const end = from + 366 * 86_400_000
+  while (d.getTime() <= end) {
+    if (!mo.has(d.getMonth() + 1)) {
+      d.setMonth(d.getMonth() + 1, 1)
+      d.setHours(0, 0, 0, 0)
+      continue
+    }
+    // cron: when both day fields are restricted, either one matching is enough
+    const dayOk = domAny && dowAny ? true : domAny ? dow.has(d.getDay()) : dowAny ? dom.has(d.getDate()) : dom.has(d.getDate()) || dow.has(d.getDay())
+    if (!dayOk) {
+      d.setDate(d.getDate() + 1)
+      d.setHours(0, 0, 0, 0)
+      continue
+    }
+    if (!ho.has(d.getHours())) {
+      d.setHours(d.getHours() + 1, 0, 0, 0)
+      continue
+    }
+    if (!mi.has(d.getMinutes())) {
+      d.setMinutes(d.getMinutes() + 1, 0, 0)
+      continue
+    }
+    return d.getTime()
+  }
+  return null
+}
+
+/** The next self-scheduled wake-up of a Claude session, from its transcript lines: a dynamic loop
+ *  (ScheduleWakeup: its time plus delaySeconds, `stop` ends it) or a cron job (CronCreate, until
+ *  CronDelete or, for a one-shot, until it fired). Earliest upcoming, or null. */
+export function nextWake(lines: string[], now = Date.now()): Wake | null {
+  let loop: Wake | null = null
+  const jobs = new Map<string, { cron: string; recurring: boolean; next: number | null }>()
+  for (const raw of lines) {
+    if (!raw.includes('ScheduleWakeup') && !raw.includes('Cron') && !raw.includes('nextFireAt')) continue
+    let o: { timestamp?: string; message?: { content?: unknown }; toolUseResult?: { id?: string; humanSchedule?: string; recurring?: boolean; nextFireAt?: number } }
+    try {
+      o = JSON.parse(raw)
+    } catch {
+      continue
+    }
+    const ts = o.timestamp ? Date.parse(o.timestamp) : now
+    const r = o.toolUseResult
+    if (r && r.id && r.humanSchedule) jobs.set(r.id, { cron: r.humanSchedule, recurring: !!r.recurring, next: r.nextFireAt ?? null })
+    const content = o.message?.content
+    if (!Array.isArray(content)) continue
+    for (const c of content as { type?: string; name?: string; input?: Record<string, unknown> }[]) {
+      if (c.type !== 'tool_use') continue
+      if (c.name === 'ScheduleWakeup') {
+        const stop = c.input?.stop === true
+        const delay = Number(c.input?.delaySeconds)
+        loop = stop || !Number.isFinite(delay) ? null : { at: ts + delay * 1000, kind: 'loop', label: String(c.input?.reason ?? '').slice(0, 120) }
+      } else if (c.name === 'CronDelete' && c.input?.id) jobs.delete(String(c.input.id))
+    }
+  }
+  let best: Wake | null = loop && loop.at > now - 60_000 ? loop : null
+  for (const j of jobs.values()) {
+    let at = j.next
+    if (j.recurring || at === null || at < now - 60_000) at = j.recurring ? nextCron(j.cron, now) : at !== null && at >= now - 60_000 ? at : null
+    if (at !== null && (!best || at < best.at)) best = { at, kind: 'cron', label: j.cron }
+  }
+  return best
+}
+
+/** The transcript's last lines (up to `bytes`), for schedule scanning. */
+export async function tailLines(file: string, bytes = 4 * 1024 * 1024): Promise<string[]> {
+  let fh
+  try {
+    fh = await open(file, 'r')
+  } catch {
+    return []
+  }
+  try {
+    const { size } = await fh.stat()
+    const len = Math.min(size, bytes)
+    const buf = new Uint8Array(len)
+    await fh.read(buf, 0, len, size - len)
+    const lines = new TextDecoder().decode(buf).split('\n')
+    if (size > len) lines.shift()
+    return lines
+  } finally {
+    await fh.close()
+  }
+}
+
+/** A tab title worth showing, or undefined: drops the spinner glyphs Claude puts in front, and
+ *  generic names (the agent's, the workspace's, a shell or executable path). */
+export function tabTitle(raw: string | null | undefined, generic: (string | null | undefined)[] = []): string | undefined {
+  const t = String(raw ?? '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (t.length < 3) return undefined
+  const low = t.toLowerCase()
+  if (['claude code', 'claude', 'codex', 'terminal', 'shell'].includes(low)) return undefined
+  if (generic.some((g) => g && low === String(g).trim().toLowerCase())) return undefined
+  if (/[\\/]|\.exe\b|^(cmd|pwsh|powershell|bash|zsh|sh|node)(\s|$)/i.test(t)) return undefined
+  return t
+}
+
+/** The kind and detail of one tool call, in plain words. */
+export function describeTool(name: string, input: Record<string, unknown>): { kind: string; detail: string } {
+  const n = name.toLowerCase()
+  if (n === 'edit' || n === 'multiedit' || n === 'notebookedit') return { kind: 'edit', detail: base(input.file_path ?? input.notebook_path) }
+  if (n === 'write') return { kind: 'write', detail: base(input.file_path) }
+  if (n === 'read') return { kind: 'read', detail: base(input.file_path) }
+  if (n === 'bash' || n === 'powershell' || n === 'shell') return input.description ? { kind: 'plain', detail: oneLine(input.description) } : { kind: 'run', detail: oneLine(input.command, 60) }
+  if (n === 'grep' || n === 'glob' || n === 'search') return { kind: 'search', detail: oneLine(input.pattern ?? input.query, 50) }
+  if (n === 'agent' || n === 'task') return { kind: 'agent', detail: oneLine(input.description ?? input.subagent_type) }
+  if (n === 'webfetch' || n === 'websearch') return { kind: 'web', detail: oneLine(input.url ?? input.query, 60) }
+  if (n === 'todowrite') return { kind: 'plan', detail: '' }
+  if (n.startsWith('mcp__')) return { kind: 'tool', detail: n.split('__').pop() ?? n }
+  return { kind: 'tool', detail: name }
+}
+
+/** User turns that are not requests: permission denials, interruptions, the preamble Orca gives
+ *  its workers, Claude's resume notes. */
+export const NOT_A_REQUEST = /^(Denied:|\[Request interrupted|\[Orca:|You are working inside Orca|Caveat:|This session is being continued|Continue where you left off)/i
+
+/** The text a user turn carries, or null for tool results and harness notes. */
+function promptText(content: unknown): string | null {
+  let text = ''
+  if (typeof content === 'string') text = content
+  else if (Array.isArray(content)) {
+    const parts = content.filter((c: { type?: string }) => c && c.type === 'text').map((c: { text?: string }) => c.text ?? '')
+    if (!parts.length) return null
+    text = parts.join('\n')
+  } else return null
+  text = text.trim()
+  if (!text || text.startsWith('<')) return null
+  if (NOT_A_REQUEST.test(text)) return null
+  // mail between agents: "──── From: … ──── Subject: <subject>\n<body>". A subject that says
+  // nothing (agents mail "Denied: Bash" too) gives way to the body's first line.
+  const subj = /Subject:\s*([^\n]+)\n?([\s\S]*)/.exec(text)
+  if (/^─+\s*From:/.test(text) && subj) {
+    const subject = subj[1].trim()
+    const body = subj[2].trim().split('\n').find((l) => l.trim()) ?? ''
+    if ((NOT_A_REQUEST.test(subject) || subject.length < 12) && body) return oneLine(body, 120)
+    return oneLine(subject, 120)
+  }
+  return oneLine(text, 120)
+}
+
+export async function readActivity(transcript: string, tailBytes = TAIL_BYTES): Promise<Activity | null> {
+  let fh
+  try {
+    fh = await open(transcript, 'r')
+  } catch {
+    return null
+  }
+  try {
+    const { size, mtimeMs } = await fh.stat()
+    const len = Math.min(size, tailBytes)
+    const buf = new Uint8Array(len)
+    await fh.read(buf, 0, len, size - len)
+    const lines = new TextDecoder().decode(buf).split('\n')
+    if (size > len) lines.shift() // cut mid-line
+    const out: Activity = { at: mtimeMs }
+    for (let i = lines.length - 1; i >= 0 && (!out.prompt || !out.act); i--) {
+      const l = lines[i].trim()
+      if (!l) continue
+      let o: { type?: string; isMeta?: boolean; isSidechain?: boolean; message?: { role?: string; content?: unknown } }
+      try {
+        o = JSON.parse(l)
+      } catch {
+        continue
+      }
+      if (o.isSidechain) continue
+      if (!out.act && o.type === 'assistant' && Array.isArray(o.message?.content)) {
+        const items = o.message.content as { type?: string; name?: string; input?: Record<string, unknown>; text?: string }[]
+        const last = items[items.length - 1]
+        if (last?.type === 'tool_use' && last.name) out.act = describeTool(last.name, last.input ?? {})
+        else if (last?.type === 'text' && last.text?.trim()) out.act = { kind: 'reply', detail: '' }
+        else if (last?.type === 'thinking') out.act = { kind: 'think', detail: '' }
+      }
+      if (!out.prompt && o.type === 'user' && !o.isMeta) {
+        const p = promptText(o.message?.content)
+        if (p) out.prompt = p
+      }
+    }
+    return out
+  } finally {
+    await fh.close()
+  }
+}
+
 /** Stable key of an agent: its terminal, or for a chat its session. */
 export function agentKey(a: { terminalId?: string | null; sessionId?: string | null }): string | null {
   if (a.terminalId) return 'term:' + a.terminalId
@@ -202,7 +528,11 @@ export default function activate(orca: OrcaWorkerApi): void {
     tr = translator(String((await orca.settings.get('language')) ?? 'en'))
     const [v, d] = await Promise.all([orca.storage.get(TASKS), orca.storage.get(DISMISSED)])
     tasks = Array.isArray(v) ? (v as unknown as Task[]) : []
-    for (const t of tasks) if (!t.source) t.source = 'pod'
+    for (const t of tasks) {
+      if (!t.source) t.source = 'pod'
+      // requests saved before the filter existed
+      if (t.prompt && NOT_A_REQUEST.test(t.prompt)) t.prompt = undefined
+    }
     // A launch or send cut off by a worker restart never finished: show it as failed so it can be
     // retried by hand. It is not resent on its own, so a bot never gets the same message twice.
     for (const t of tasks) {
@@ -300,7 +630,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   function dismiss(t: Task): void {
-    const k = taskKey(t)
+    // an automation's card stays off until it is turned off and on again (its id is the key)
+    const k = t.wakeKind === 'automation' ? t.id : taskKey(t)
     if (t.source === 'orca' && k) dismissed[k] = Date.now()
   }
 
@@ -353,16 +684,16 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   /** Every agent's last reply, by Orca session id, from `orca agent list` (one CLI call for all
    *  agents, chats and terminals alike), cached for REPLIES_EVERY_MS. */
-  type SessionInfo = { text: string; at: number; state: AgentState | null }
+  type SessionInfo = { text: string; at: number; state: AgentState | null; title: string }
   let sessions = new Map<string, SessionInfo>()
   let repliesAt = 0
   async function sessionInfo(force = false): Promise<Map<string, SessionInfo>> {
     if (!force && Date.now() - repliesAt < REPLIES_EVERY_MS) return sessions
     repliesAt = Date.now()
-    const r = (await runOrca(['agent', 'list']).catch(() => null)) as { agents?: { orcaSessionId: string; state?: AgentState; lastAssistantMessage?: string | null; updatedAt?: number }[] } | null
+    const r = (await runOrca(['agent', 'list']).catch(() => null)) as { agents?: { orcaSessionId: string; state?: AgentState; title?: string | null; lastAssistantMessage?: string | null; updatedAt?: number }[] } | null
     if (r?.agents) {
       sessions = new Map(
-        r.agents.map((a) => [a.orcaSessionId, { text: String(a.lastAssistantMessage ?? '').replace(/\s+/g, ' ').trim(), at: a.updatedAt ?? 0, state: a.state ?? null }])
+        r.agents.map((a) => [a.orcaSessionId, { text: String(a.lastAssistantMessage ?? '').replace(/\s+/g, ' ').trim(), at: a.updatedAt ?? 0, state: a.state ?? null, title: String(a.title ?? '') }])
       )
     }
     return sessions
@@ -396,6 +727,161 @@ export default function activate(orca: OrcaWorkerApi): void {
     return owners
   }
 
+  const deepRead = new Map<string, number>()
+
+  /** A Claude session's next self-scheduled wake-up (loop or cron job), from its transcript. */
+  async function scheduleFor(t: Task): Promise<Wake | null> {
+    const path = t.workspaceId ? (await workspaces()).get(t.workspaceId)?.path : undefined
+    if (!path) return null
+    const dir = await sessionDirFor(claudeProjectDir(path), t.sessionId, !t.terminalId)
+    if (!dir) return null
+    return nextWake(await tailLines(dir + '.jsonl'))
+  }
+
+  /** Orca automations on the board: each enabled one waits in Queued for its next run. */
+  let automationsAt = 0
+  async function syncAutomations(): Promise<boolean> {
+    if (Date.now() - automationsAt < AUTOMATIONS_EVERY_MS) return false
+    automationsAt = Date.now()
+    if (!(await settings()).showOrcaAgents) return false
+    let list: { id: string; name: string; agent: string; prompt: string; projectId: string | null; workspaceId: string | null; schedule: string | null; enabled: boolean; nextRunAt: number | null }[]
+    try {
+      list = (await orca.host.call('automation.list')).automations
+    } catch (e) {
+      orca.log('automation.list failed: ' + errMessage(e))
+      return false
+    }
+    const ws = await workspaces()
+    const projects = new Map(((await orca.host.call('project.list').catch(() => null))?.projects ?? []).map((p) => [p.id, p]))
+    let changed = false
+    const live = new Set<string>()
+    for (const a of list) {
+      const id = 'auto:' + a.id
+      if (!a.enabled || !a.nextRunAt || dismissed[id]) continue
+      live.add(id)
+      const w = a.workspaceId ? ws.get(a.workspaceId) : undefined
+      const p = a.projectId ? projects.get(a.projectId) : undefined
+      const place: Task['place'] = w ? (isBotWorkspace(w) ? 'bot' : w.kind === 'worktree' ? 'git' : 'folder') : p?.kind === 'git' ? 'git' : 'folder'
+      const fields = {
+        title: a.name,
+        prompt: oneLine(a.prompt, 120),
+        agent: (a.agent || 'claude').toLowerCase(),
+        projectName: w?.project || w?.name || p?.name || a.name,
+        place,
+        wakeAt: a.nextRunAt,
+        wakeKind: 'automation' as const,
+        wakeLabel: a.schedule ?? '',
+      }
+      const t = tasks.find((x) => x.id === id)
+      if (!t) {
+        const now = Date.now()
+        tasks.push({ id, source: 'orca', projectId: a.projectId ?? '', hostId: null, workspaceId: a.workspaceId ?? undefined, state: 'queued', since: now, createdAt: now, timeline: [{ s: 'queued', at: now, note: tr('note.automation') }], ...fields })
+        changed = true
+      } else if (JSON.stringify(fields) !== JSON.stringify({ title: t.title, prompt: t.prompt, agent: t.agent, projectName: t.projectName, place: t.place, wakeAt: t.wakeAt, wakeKind: t.wakeKind, wakeLabel: t.wakeLabel })) {
+        Object.assign(t, fields)
+        changed = true
+      }
+    }
+    const before = tasks.length
+    tasks = tasks.filter((t) => !t.id.startsWith('auto:') || live.has(t.id))
+    return changed || tasks.length !== before
+  }
+
+  /** Keeps each card's tab title in step with Orca: a terminal's title (which Claude sets to a
+   *  summary of the session), or a chat's. Generic ones ("Claude Code", a shell) are ignored. */
+  let titlesAt = 0
+  async function refreshTitles(): Promise<boolean> {
+    if (Date.now() - titlesAt < TITLES_EVERY_MS) return false
+    titlesAt = Date.now()
+    let changed = false
+    const byWorkspace = new Map<string, Map<string, string>>()
+    const sess = await sessionInfo()
+    for (const t of tasks) {
+      let title: string | undefined
+      if (t.terminalId && t.workspaceId) {
+        if (!byWorkspace.has(t.workspaceId)) {
+          const r = await orca.host.call('terminal.list', { workspaceId: t.workspaceId }).catch(() => null)
+          byWorkspace.set(t.workspaceId, new Map((r?.terminals ?? []).map((x) => [x.id, x.title ?? ''])))
+        }
+        title = byWorkspace.get(t.workspaceId)?.get(t.terminalId)
+      } else if (t.sessionId) {
+        title = sess.get(orcaKey(t) ?? '')?.title
+      }
+      const clean = tabTitle(title, [agentLabel(t.agent), t.projectName, t.bot, t.byBot])
+      if (clean && clean !== t.tabTitle) {
+        t.tabTitle = clean
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  /** An action from the transcript, worded in the selected language. */
+  function wordActivity(a: { kind: string; detail: string }): string {
+    if (a.kind === 'plain') return a.detail
+    const key = ('act.' + a.kind) as Parameters<typeof tr>[0]
+    try {
+      return tr(key, { d: a.detail })
+    } catch {
+      return a.detail
+    }
+  }
+
+  /** Refreshes the Claude sub-agents of running and waiting tasks. Keeps those of the current run
+   *  (started since the task last went running), at most 12. */
+  async function scanSubagents(): Promise<boolean> {
+    const ws = await workspaces()
+    let changed = false
+    for (const t of tasks) {
+      const active = t.state === 'running' || t.state === 'waiting'
+      // a done card is read once, only to learn what it was asked (for a generic title)
+      const once = t.state === 'done' && !t.prompt && !deepRead.has(t.id)
+      if ((!active && !once) || t.agent !== 'claude') continue
+      const path = t.workspaceId ? ws.get(t.workspaceId)?.path : undefined
+      if (!path) continue
+      const dir = await sessionDirFor(claudeProjectDir(path), t.sessionId, !t.terminalId)
+      if (!dir) continue
+      if (once) {
+        deepRead.set(t.id, Date.now())
+        const a = await readActivity(dir + '.jsonl', DEEP_TAIL_BYTES)
+        if (a?.prompt) {
+          t.prompt = a.prompt
+          changed = true
+        }
+        continue
+      }
+      const runStart = [...t.timeline].reverse().find((e) => e.s === 'running')?.at ?? t.createdAt
+      const subs = (await readSubagents(dir)).filter((s) => s.running || s.at >= runStart - 1000).slice(0, 12)
+      const prev = JSON.stringify(t.subagents ?? [])
+      const next = JSON.stringify(subs)
+      if (prev !== next) {
+        t.subagents = subs.length ? subs : undefined
+        changed = true
+      }
+      // What it is doing now, and what it was asked last
+      let act = await readActivity(dir + '.jsonl')
+      // Long tool output can push the last request out of the tail: look further back, at most
+      // once a minute per task.
+      if (act && !act.prompt && Date.now() - (deepRead.get(t.id) ?? 0) > 60_000) {
+        deepRead.set(t.id, Date.now())
+        const deep = await readActivity(dir + '.jsonl', DEEP_TAIL_BYTES)
+        if (deep?.prompt) act = { ...act, prompt: deep.prompt }
+      }
+      if (act) {
+        const doing = act.act ? wordActivity(act.act) : undefined
+        if (doing !== t.activity) {
+          t.activity = doing
+          changed = true
+        }
+        if (act.prompt && act.prompt !== t.prompt) {
+          t.prompt = act.prompt
+          changed = true
+        }
+      }
+    }
+    return changed
+  }
+
   /** Tags each task with the bot that started its workspace. */
   async function tagOwners(): Promise<boolean> {
     const m = await ownerBots()
@@ -414,7 +900,7 @@ export default function activate(orca: OrcaWorkerApi): void {
    *  Reads the agent's last reply and, for a terminal agent, its last lines. */
   async function limitHit(t: Task): Promise<string | null> {
     const texts: string[] = []
-    const r = t.sessionId ? (await lastReplies()).get(t.sessionId) : undefined
+    const r = orcaKey(t) ? (await lastReplies()).get(orcaKey(t) as string) : undefined
     if (r && r.at >= (t.sentAt ?? 0)) texts.push(r.text)
     if (t.terminalId) texts.push((await readTail(t, 40)).slice(-8).join('\n'))
     for (const s of texts) {
@@ -428,7 +914,7 @@ export default function activate(orca: OrcaWorkerApi): void {
    *  Running: that reply only if it came after the task was sent, else "working…". Agents Orca has
    *  no reply for yet fall back to the terminal's newest text. */
   async function captureLast(t: Task, force = false): Promise<void> {
-    const reply = t.sessionId ? (await lastReplies(force)).get(t.sessionId) : undefined
+    const reply = orcaKey(t) ? (await lastReplies(force)).get(orcaKey(t) as string) : undefined
     const fresh = reply && reply.at >= (t.sentAt ?? 0)
     if (reply && (t.state !== 'running' || fresh)) {
       t.last = reply.text.length > 240 ? reply.text.slice(0, 239) + '…' : reply.text
@@ -452,7 +938,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     // Tasks being launched are already 'running', so they count here.
     const running = tasks.filter((t) => t.state === 'running' && t.source !== 'orca').length
     let room = maxParallel > 0 ? maxParallel - running : Infinity
-    const queue = tasks.filter((t) => t.state === 'queued').sort((a, b) => a.createdAt - b.createdAt)
+    // only Pod's own tasks waiting for a slot; scheduled ones start by themselves
+    const queue = tasks.filter((t) => t.state === 'queued' && t.source === 'pod' && !t.wakeAt).sort((a, b) => a.createdAt - b.createdAt)
     for (const t of queue) {
       if (room <= 0) break
       room -= 1
@@ -558,6 +1045,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   function markSent(t: Task, home: string | null, sentAt: number): void {
     if (home) {
       t.sessionId = home
+      t.orcaSessionId = home
       // The Home Chat may already be on the board as an adopted Orca agent.
       tasks = tasks.filter((x) => !(x.source === 'orca' && x.sessionId === home))
     }
@@ -610,12 +1098,52 @@ export default function activate(orca: OrcaWorkerApi): void {
     return tasks.find((t) => t.source === 'pod' && !t.launchIn && t.workspaceId === ws && !t.terminalId && t.state !== 'queued')
   }
 
+  /** findTask, then by Orca's id when the report carries a chat's Claude conversation id: a bot
+   *  task Pod mailed knows its chat only by Orca's id. Learns the conversation id on the way. */
+  async function findTaskAsync(p: { terminalId?: string | null; sessionId?: string | null; workspaceListId?: string; workspaceId?: string | null }): Promise<Task | undefined> {
+    const t = findTask(p)
+    if (t || !p.sessionId) return t
+    const oid = await orcaIdFor(p.sessionId)
+    if (!oid) return undefined
+    const hit = tasks.find((x) => x.orcaSessionId === oid || x.sessionId === oid)
+    if (hit) {
+      hit.orcaSessionId = oid
+      hit.sessionId = p.sessionId
+    }
+    return hit
+  }
+
   /** True when a workspace belongs to a Pod task still launching (its id is not known yet). */
   function isPodLaunch(w: WorkspaceRow): boolean {
     return tasks.some((t) => t.source === 'pod' && !t.workspaceId && t.branch && (w.name === t.branch || w.branch === t.branch))
   }
 
-  /** Puts an agent started in Orca on the board. Returns the new task, if any. */
+  /** Orca's session id for a session id the plugin API reported. The plugin API gives a chat's
+   *  Claude conversation id; Orca names the session differently, and answers the mapping when
+   *  asked about the conversation id ("… Address it as orca_session_id:<id>"). Cached. */
+  const orcaIds = new Map<string, string>()
+  async function orcaIdFor(sid: string | null | undefined): Promise<string | undefined> {
+    if (!sid) return undefined
+    if (orcaIds.has(sid)) return orcaIds.get(sid)
+    if ((await sessionInfo()).has(sid)) {
+      orcaIds.set(sid, sid)
+      return sid
+    }
+    let oid: string | undefined
+    try {
+      // bare id: Orca answers a conversation id with `agent_provider_id` naming its own id
+      const r = (await runOrca(['agent', 'show', sid])) as { orcaSessionId?: string }
+      oid = r?.orcaSessionId
+    } catch (e) {
+      oid = /orca_session_id:([0-9a-f-]{36})/i.exec(errMessage(e))?.[1]
+    }
+    if (oid) orcaIds.set(sid, oid)
+    return oid
+  }
+  /** The id `orca agent list` knows a task's session by. */
+  const orcaKey = (t: Task) => t.orcaSessionId ?? t.sessionId ?? undefined
+
+  /** A bot's own workspace: a folder that belongs to no project. */
   const isBotWorkspace = (w: WorkspaceRow) => w.kind === 'folder' && !w.projectId
 
   /** A bot's real chats, by session id (from `orca bot chats`), cached briefly. Orca can report
@@ -637,12 +1165,15 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!isBotWorkspace(w)) return true
     const ids = await botChats(w.name)
     if (!ids) return null
-    return !!a.sessionId && ids.has(a.sessionId)
+    if (!a.sessionId) return false
+    // the plugin API gives a chat's Claude conversation id; bot chats are listed by Orca's id
+    return ids.has(a.sessionId) || ids.has((await orcaIdFor(a.sessionId)) ?? '')
   }
 
+  /** Puts an agent started in Orca on the board. Returns the new task, if any. */
   async function adopt(w: WorkspaceRow, a: AgentRow, fromEvent: boolean): Promise<Task | null> {
     const k = agentKey(a)
-    if (!k || findTask(a) || isPodLaunch(w)) return null
+    if (!k || (await findTaskAsync(a)) || isPodLaunch(w)) return null
     if ((await isRealAgent(w, a)) !== true) return null
     // A worktree Pod created belongs to its task; a shared folder or bot workspace does not.
     if (tasks.some((t) => t.source === 'pod' && !t.launchIn && t.workspaceId === w.id)) return null
@@ -667,6 +1198,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       workspaceId: w.id,
       terminalId: a.terminalId,
       sessionId: a.sessionId ?? null,
+      orcaSessionId: await orcaIdFor(a.sessionId),
       branch: w.branch || undefined,
       timeline: [{ s: state, at, note: tr('note.openedOrca') }],
     }
@@ -692,7 +1224,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     // Drop Orca cards that are not a real chat of their bot (adopted before this check existed).
     for (const t of [...tasks]) {
       const w = t.source === 'orca' && t.workspaceId ? ws.get(t.workspaceId) : undefined
-      if (w && isBotWorkspace(w) && (await isRealAgent(w, t)) === false) {
+      if (w && isBotWorkspace(w) && (await isRealAgent(w, { sessionId: t.orcaSessionId ?? t.sessionId })) === false) {
         tasks = tasks.filter((x) => x.id !== t.id)
         changed = true
       }
@@ -713,6 +1245,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (ids?.sessionId && !t.sessionId) t.sessionId = ids.sessionId
     let col = columnFor(state)
     if (t.error) return false
+    // Still idle before its scheduled wake-up: nothing to re-read yet.
+    if (col === 'done' && t.state === 'queued' && t.wakeAt && Date.now() < t.wakeAt + 60_000) return false
     // An agent stopped by its usage limit is not done: it waits for the limit to reset (or for
     // you). Checked before the pickup guard, since a limit can stop an agent right at launch.
     if (col === 'running') {
@@ -740,12 +1274,28 @@ export default function activate(orca: OrcaWorkerApi): void {
       // A reply that came after the task was sent proves the work happened, even when it was so
       // quick that no "working" report was seen.
       const answered = async () => {
-        const r = t.sessionId ? (await lastReplies(true)).get(t.sessionId) : undefined
+        const r = orcaKey(t) ? (await lastReplies(true)).get(orcaKey(t) as string) : undefined
         return !!r && r.at >= (t.sentAt ?? 0)
       }
       if (col === 'running') t.awaitPickup = false
       else if (col === 'done' && fresh && !(await answered())) return false
       else t.awaitPickup = false
+    }
+    // A session that stops with a wake-up scheduled (a loop, a cron job) is not done: it goes back
+    // to Queued until then. Waking up clears it.
+    if (col === 'running' && t.wakeAt) {
+      t.wakeAt = t.wakeKind = t.wakeLabel = undefined
+    } else if (col === 'done' && t.agent === 'claude') {
+      const w = await scheduleFor(t)
+      if (w) {
+        const moved = t.state !== 'queued' || t.wakeAt !== w.at
+        t.wakeAt = w.at
+        t.wakeKind = w.kind
+        t.wakeLabel = w.label
+        if (t.state !== 'queued') move(t, 'queued', tr(w.kind === 'loop' ? 'note.loop' : 'note.cron'))
+        return moved
+      }
+      if (t.wakeAt) t.wakeAt = t.wakeKind = t.wakeLabel = undefined
     }
     if (col === t.state) return false
     const prev = t.state
@@ -761,9 +1311,12 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.events.on('agent.status.changed', (p) =>
     serial(async () => {
-      const t = findTask(p)
+      const t = await findTaskAsync(p)
       if (t) {
-        if (await applyAgentState(t, p.state, p, p.mainAgent?.stateStartedAt ?? p.receivedAt)) {
+        const tt = tabTitle(p.title, [agentLabel(t.agent), t.projectName, t.bot, t.byBot])
+        const retitled = !!tt && tt !== t.tabTitle
+        if (retitled) t.tabTitle = tt
+        if ((await applyAgentState(t, p.state, p, p.mainAgent?.stateStartedAt ?? p.receivedAt)) || retitled) {
           await save()
           await dispatch()
         }
@@ -800,7 +1353,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function reconcile(): Promise<boolean> {
     let changed = false
     for (const t of [...tasks]) {
-      if (!t.workspaceId || t.error || t.state === 'queued') continue
+      if (!t.workspaceId || t.error || (t.state === 'queued' && !t.wakeAt) || t.wakeKind === 'automation') continue
       if (t.state === 'done' && t.last) continue
       const agents = await agentsIn(t.workspaceId)
       if (agents) {
@@ -808,7 +1361,7 @@ export default function activate(orca: OrcaWorkerApi): void {
         if (!a && t.source === 'pod' && !t.launchIn && !t.terminalId) a = agents[0]
         // The plugin API does not always tie a bot's chat to its session id: fall back to the
         // state `orca agent list` reports for that session.
-        const s = !a && t.sessionId ? (await sessionInfo()).get(t.sessionId) : undefined
+        const s = !a && orcaKey(t) ? (await sessionInfo()).get(orcaKey(t) as string) : undefined
         if (a) {
           if (await applyAgentState(t, a.state, a, a.stateStartedAt)) changed = true
         } else if (s?.state) {
@@ -835,6 +1388,9 @@ export default function activate(orca: OrcaWorkerApi): void {
       let changed = await reconcile()
       if (Date.now() - lastDiscover > DISCOVER_EVERY_MS && (await discover())) changed = true
       if (await tagOwners()) changed = true
+      if (await scanSubagents()) changed = true
+      if (await refreshTitles()) changed = true
+      if (await syncAutomations()) changed = true
       if (changed) await save()
       await dispatch()
       return snapshot()
@@ -931,7 +1487,6 @@ export default function activate(orca: OrcaWorkerApi): void {
     })
   )
 
-  // Raising the limit from Settings starts queued tasks right away.
   orca.panels.handle('pod.setLanguage', (input) =>
     serial(async () => {
       const lang = (LANGS as string[]).includes(input.language) ? input.language : 'en'
@@ -942,6 +1497,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     })
   )
 
+  // A new language rebuilds the strings; raising the limit from Settings starts queued tasks.
   orca.settings.onDidChange(({ key }) => {
     if (key === 'language') {
       void serial(async () => {

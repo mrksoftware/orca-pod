@@ -14,8 +14,18 @@ declare module 'node:fs' {
   export function existsSync(path: string): boolean
 }
 declare module 'node:fs/promises' {
+  export function readdir(path: string): Promise<string[]>
+  export function open(path: string, flags: 'r'): Promise<{
+    stat(): Promise<{ size: number; mtimeMs: number }>
+    read(buffer: Uint8Array, offset: number, length: number, position: number): Promise<{ bytesRead: number }>
+    close(): Promise<void>
+  }>
+  export function readFile(path: string, encoding: 'utf8'): Promise<string>
+  export function stat(path: string): Promise<{ mtimeMs: number; isDirectory(): boolean }>
   export function mkdtemp(prefix: string): Promise<string>
-  export function writeFile(path: string, data: string, encoding: 'utf8'): Promise<void>
+  export function writeFile(path: string, data: string, encoding?: 'utf8'): Promise<void>
+  export function mkdir(path: string, opts?: { recursive?: boolean }): Promise<string | undefined>
+  export function utimes(path: string, atime: Date, mtime: Date): Promise<void>
   export function rm(path: string, opts: { recursive?: boolean; force?: boolean }): Promise<void>
 }
 declare module 'node:os' {

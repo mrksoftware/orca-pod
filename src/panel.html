@@ -142,6 +142,10 @@
         <div class="d-head">
           <span class="pill" id="d-pill"></span>
           <h2 class="d-title" id="d-title"></h2>
+          <div class="d-now" id="d-ask-now" hidden>
+            <span class="d-now-q" id="d-ask-now-q"></span>
+            <span class="d-now-a" id="d-ask-now-a"></span>
+          </div>
           <div class="d-meta">
             <span><svg class="ic ic--s" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"></path><rect x="4" y="8" width="16" height="12" rx="2"></rect><path d="M9 13v2M15 13v2"></path></svg><span id="d-agent"></span></span>
             <span id="d-place"></span>
@@ -168,6 +172,10 @@
           <div class="ask-row"><span></span><button class="send" id="d-retry" data-i18n="detail.retry">Retry</button></div>
         </div>
 
+        <div class="sec" id="d-subs-sec" hidden>
+          <h3 class="label" data-i18n="sub.title">Sub-agents</h3>
+          <div class="box sa-list" id="d-subs"></div>
+        </div>
         <div class="sec">
           <h3 class="label" data-i18n="detail.timeline">Timeline</h3>
           <div class="box tl" id="d-timeline"></div>

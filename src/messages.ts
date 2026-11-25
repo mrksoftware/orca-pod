@@ -4,6 +4,20 @@ export type Lang = 'en' | 'it' | 'es'
 export const LANGS: Lang[] = ['en', 'it', 'es']
 
 const en = {
+  'note.loop': 'loop: waits for its next wake-up',
+  'note.cron': 'scheduled: waits for its next run',
+  'note.automation': 'Orca automation',
+  'act.edit': 'Editing {d}',
+  'act.write': 'Writing {d}',
+  'act.read': 'Reading {d}',
+  'act.run': 'Running {d}',
+  'act.search': 'Searching for {d}',
+  'act.agent': 'Delegating: {d}',
+  'act.web': 'Reading the web: {d}',
+  'act.plan': 'Planning the next steps',
+  'act.tool': 'Using {d}',
+  'act.reply': 'Writing the answer',
+  'act.think': 'Thinking',
   'limit.q': 'Stopped by the usage limit. It resets {reset}',
   'limit.qNoReset': 'Stopped by the usage limit',
   'note.limit': 'usage limit reached',
@@ -43,6 +57,20 @@ const en = {
 type Key = keyof typeof en
 
 const it: Record<Key, string> = {
+  'note.loop': 'loop: aspetta il prossimo risveglio',
+  'note.cron': 'pianificato: aspetta la prossima esecuzione',
+  'note.automation': 'automazione di Orca',
+  'act.edit': 'Modifica {d}',
+  'act.write': 'Scrive {d}',
+  'act.read': 'Legge {d}',
+  'act.run': 'Esegue {d}',
+  'act.search': 'Cerca {d}',
+  'act.agent': 'Delega: {d}',
+  'act.web': 'Legge dal web: {d}',
+  'act.plan': 'Pianifica i prossimi passi',
+  'act.tool': 'Usa {d}',
+  'act.reply': 'Scrive la risposta',
+  'act.think': 'Ragiona',
   'limit.q': 'Fermo per il limite di utilizzo. Si azzera {reset}',
   'limit.qNoReset': 'Fermo per il limite di utilizzo',
   'note.limit': 'limite di utilizzo raggiunto',
@@ -81,6 +109,20 @@ const it: Record<Key, string> = {
 }
 
 const es: Record<Key, string> = {
+  'note.loop': 'bucle: espera el próximo despertar',
+  'note.cron': 'programado: espera la próxima ejecución',
+  'note.automation': 'automatización de Orca',
+  'act.edit': 'Editando {d}',
+  'act.write': 'Escribiendo {d}',
+  'act.read': 'Leyendo {d}',
+  'act.run': 'Ejecutando {d}',
+  'act.search': 'Buscando {d}',
+  'act.agent': 'Delegando: {d}',
+  'act.web': 'Leyendo la web: {d}',
+  'act.plan': 'Planificando los próximos pasos',
+  'act.tool': 'Usando {d}',
+  'act.reply': 'Escribiendo la respuesta',
+  'act.think': 'Pensando',
   'limit.q': 'Detenido por el límite de uso. Se restablece {reset}',
   'limit.qNoReset': 'Detenido por el límite de uso',
   'note.limit': 'límite de uso alcanzado',

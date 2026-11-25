@@ -1,9 +1,10 @@
 // Runs src/worker.ts's activate(orca) over a mock Orca host.
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import * as main from './worker'
-import { cleanLines, columnFor, detectLimit, setOrcaRunner, slug } from './worker'
+import { claudeProjectDir, cleanLines, columnFor, describeTool, detectLimit, nextCron, nextWake, readActivity, readSubagents, sessionDirFor, setOrcaRunner, slug, tabTitle } from './worker'
 
-const settle = () => new Promise((r) => setTimeout(r, 30))
+// launches run in the background (void launch): give them time to finish, also on a busy machine
+const settle = () => new Promise((r) => setTimeout(r, 150))
 
 function host(extra: Record<string, unknown> = {}, maxParallel = 1) {
   let n = 0
@@ -60,6 +61,144 @@ test('an agent stopped by the usage limit waits for you instead of looking done'
   assert.equal(s.tasks[0].state, 'running')
   assert.equal(s.tasks[0].limit, undefined)
   await w.deactivate()
+})
+
+test("reads Claude sub-agents from a session's folder", async () => {
+  const { mkdtemp, mkdir, writeFile, utimes } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  assert.equal(claudeProjectDir('C:\\Users\\me\\.orca\\bots\\pm', 'B'), join('B', 'C--Users-me--orca-bots-pm'))
+
+  const proj = await mkdtemp(join(tmpdir(), 'pod-claude-'))
+  const conv = 'conv-1'
+  const subs = join(proj, conv, 'subagents')
+  await mkdir(subs, { recursive: true })
+  await writeFile(join(proj, conv + '.jsonl'), '{}')
+  // while a sub-agent works its meta has no `finished` at all
+  await writeFile(join(subs, 'agent-a.meta.json'), JSON.stringify({ description: 'Read the guide', agentType: 'web-fetch' }))
+  await writeFile(join(subs, 'agent-a.jsonl'), '{}')
+  await writeFile(join(subs, 'agent-b.meta.json'), JSON.stringify({ description: 'Explore repo', agentType: 'Explore', finished: true }))
+  await writeFile(join(subs, 'agent-b.jsonl'), '{}')
+  // unfinished but silent for an hour: crashed, not running
+  await writeFile(join(subs, 'agent-c.meta.json'), JSON.stringify({ description: 'Stale', finished: false }))
+  await writeFile(join(subs, 'agent-c.jsonl'), '{}')
+  const old = new Date(Date.now() - 3600_000)
+  await utimes(join(subs, 'agent-c.jsonl'), old, old)
+
+  const list = await readSubagents(join(proj, conv))
+  const byId = Object.fromEntries(list.map((s) => [s.id, s]))
+  assert.equal(byId['agent-a'].running, true)
+  assert.equal(byId['agent-a'].description, 'Read the guide')
+  assert.equal(byId['agent-b'].running, false)
+  assert.equal(byId['agent-c'].running, false)
+
+  // exact by conversation id; a chat (unknown id) takes the latest session only when allowed
+  assert.equal(await sessionDirFor(proj, conv, false), join(proj, conv))
+  assert.equal(await sessionDirFor(proj, 'orca-chat-id', false), null)
+  assert.equal(await sessionDirFor(proj, 'orca-chat-id', true), join(proj, conv))
+})
+
+test("reads what a Claude session is doing from its transcript's tail", async () => {
+  const { mkdtemp, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'pod-act-'))
+  const file = join(dir, 'conv.jsonl')
+  const lines = [
+    { type: 'user', message: { role: 'user', content: 'Fix the date picker on the settings page' } },
+    // not requests: a permission denial and Orca's worker preamble
+    { type: 'user', message: { role: 'user', content: 'Denied: Bash' } },
+    { type: 'user', message: { role: 'user', content: 'You are working inside Orca, a multi-agent IDE.' } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Looking.' }, { type: 'tool_use', name: 'Read', input: { file_path: 'C:/app/src/settings.tsx' } }] } },
+    { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', content: '...' }] } },
+    { type: 'user', isMeta: true, message: { role: 'user', content: '<system-reminder>ignored</system-reminder>' } },
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test', description: 'Run the unit tests' } }] } },
+  ]
+  await writeFile(join(dir, 'conv.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n')
+  const a = await readActivity(file)
+  assert.equal(a?.prompt, 'Fix the date picker on the settings page')
+  assert.deepEqual(a?.act, { kind: 'plain', detail: 'Run the unit tests' })
+
+  // a bot's mail is titled by its Subject
+  const mail = join(dir, 'bot.jsonl')
+  await writeFile(mail, JSON.stringify({ type: 'user', message: { role: 'user', content: '──── From: term_1 (handoff) ──── Subject: Triage the new issues\nbody' } }) + '\n')
+  assert.equal((await readActivity(mail))?.prompt, 'Triage the new issues')
+  // a subject that says nothing gives way to the body
+  const mail2 = join(dir, 'bot2.jsonl')
+  await writeFile(mail2, JSON.stringify({ type: 'user', message: { role: 'user', content: '──── From: term_1 (status) ──── Subject: Denied: Bash\nStop the timezone probe: this is the third attempt.' } }) + '\n')
+  assert.equal((await readActivity(mail2))?.prompt, 'Stop the timezone probe: this is the third attempt.')
+
+  assert.deepEqual(describeTool('Edit', { file_path: 'D:\\x\\panel.js' }), { kind: 'edit', detail: 'panel.js' })
+  assert.deepEqual(describeTool('Agent', { description: 'Explore repo' }), { kind: 'agent', detail: 'Explore repo' })
+  assert.equal(await readActivity(join(dir, 'missing.jsonl')), null)
+})
+
+test('computes the next run of cron expressions', () => {
+  const from = new Date(2026, 10, 25, 10, 7, 30).getTime() // Wed 25 Nov 2026 10:07:30
+  const at = (m: number | null) => (m === null ? null : new Date(m))
+  assert.equal(at(nextCron('*/15 * * * *', from))?.getMinutes(), 15)
+  const daily = at(nextCron('30 9 * * *', from))!
+  assert.deepEqual([daily.getDate(), daily.getHours(), daily.getMinutes()], [26, 9, 30])
+  const oneShot = at(nextCron('15 14 25 11 *', from))!
+  assert.deepEqual([oneShot.getDate(), oneShot.getHours(), oneShot.getMinutes()], [25, 14, 15])
+  const monday = at(nextCron('0 8 * * 1', from))!
+  assert.deepEqual([monday.getDay(), monday.getDate(), monday.getHours()], [1, 30, 8])
+  assert.equal(nextCron('not a cron', from), null)
+})
+
+test('finds the next wake-up of a looping or scheduled session', () => {
+  const now = Date.parse('2026-11-25T10:00:00Z')
+  const L = (o: unknown) => JSON.stringify(o)
+  const tool = (ts: string, name: string, input: unknown) => L({ timestamp: ts, message: { content: [{ type: 'tool_use', name, input }] } })
+  // a dynamic loop: 20 minutes after its last ScheduleWakeup
+  let w = nextWake([tool('2026-11-25T09:55:00Z', 'ScheduleWakeup', { delaySeconds: 1200, reason: 'watch CI' })], now)
+  assert.equal(w?.kind, 'loop')
+  assert.equal(w?.at, Date.parse('2026-11-25T10:15:00Z'))
+  // stopped loop: nothing
+  w = nextWake([tool('2026-11-25T09:55:00Z', 'ScheduleWakeup', { delaySeconds: 1200 }), tool('2026-11-25T09:58:00Z', 'ScheduleWakeup', { stop: true })], now)
+  assert.equal(w, null)
+  // a one-shot cron job, from CronCreate's result; deleted later: nothing
+  const created = L({ timestamp: '2026-11-25T09:00:00Z', toolUseResult: { id: 'job1', humanSchedule: '15 14 25 11 *', recurring: false, nextFireAt: Date.parse('2026-11-25T13:15:00Z') } })
+  w = nextWake([created], now)
+  assert.equal(w?.kind, 'cron')
+  assert.equal(w?.at, Date.parse('2026-11-25T13:15:00Z'))
+  assert.equal(nextWake([created, tool('2026-11-25T09:30:00Z', 'CronDelete', { id: 'job1' })], now), null)
+  // a one-shot whose time has passed has fired
+  assert.equal(nextWake([created], Date.parse('2026-11-25T14:00:00Z')), null)
+})
+
+test("Orca automations wait in Queued for their next run; they are never launched by Pod", async () => {
+  const next = Date.now() + 3600_000
+  const h = host({
+    'workspace.list': { workspaces: [], truncated: false },
+    'automation.list': {
+      automations: [
+        { id: 'a1', name: 'Nightly dependency check', agent: 'claude', prompt: 'Check outdated packages', promptTruncated: false, projectId: 'p1', hostId: 'local', workspaceId: null, workspaceMode: 'new-per-run', schedule: '0 2 * * *', timezone: 'Europe/Rome', enabled: true, nextRunAt: next, lastRunAt: null, createdByThisPlugin: false },
+        { id: 'a2', name: 'Off', agent: 'claude', prompt: 'x', promptTruncated: false, projectId: 'p1', hostId: 'local', workspaceId: null, workspaceMode: 'new-per-run', schedule: '0 3 * * *', timezone: 'Europe/Rome', enabled: false, nextRunAt: next, lastRunAt: null, createdByThisPlugin: false },
+      ],
+      truncated: false,
+    },
+  }, 0)
+  const w = await mountWorker(main, { host: h })
+  const s = await w.request('pod.refresh')
+  assert.equal(s.tasks.length, 1)
+  assert.equal(s.tasks[0].state, 'queued')
+  assert.equal(s.tasks[0].wakeKind, 'automation')
+  assert.equal(s.tasks[0].wakeAt, next)
+  assert.equal(s.tasks[0].projectName, 'api')
+  await settle()
+  assert.equal(h.callsOf('workspace.create').length + h.callsOf('agent.launch').length, 0)
+  await w.deactivate()
+})
+
+test('keeps tab titles worth showing', () => {
+  assert.equal(tabTitle('✳ Licenze per il bus di integrazione'), 'Licenze per il bus di integrazione')
+  assert.equal(tabTitle('⠂ Fix the flaky checkout test'), 'Fix the flaky checkout test')
+  assert.equal(tabTitle('Claude Code'), undefined)
+  assert.equal(tabTitle('C:\\WINDOWS\\system32\\cmd.exe'), undefined)
+  assert.equal(tabTitle('pwsh'), undefined)
+  assert.equal(tabTitle('PM', ['PM']), undefined)
+  assert.equal(tabTitle(null), undefined)
 })
 
 test('cleans TUI chrome from terminal lines', () => {

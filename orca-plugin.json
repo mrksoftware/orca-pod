@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "pod",
   "name": "Pod",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "mrksoftware", "url": "https://github.com/mrksoftware" },
   "repository": "https://github.com/mrksoftware/orca-pod",
   "homepage": "https://github.com/mrksoftware/orca-pod",
@@ -107,6 +107,7 @@
     { "kind": "agent:launch" },
     { "kind": "terminal:read" },
     { "kind": "terminal:send" },
-    { "kind": "notifications:show" }
+    { "kind": "notifications:show" },
+    { "kind": "automation:read" }
   ]
 }
