@@ -90,6 +90,8 @@ export type PodState = {
   maxParallel: number
   /** UI language: en (default), it, es. */
   language: string
+  /** Agent lanes of the Running column turned off in Settings (shown anyway while busy). */
+  hiddenLanes: string[]
 }
 
 declare module 'orca' {

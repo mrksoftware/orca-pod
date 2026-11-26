@@ -23,6 +23,7 @@ const S = {
   tasks: [],
   targets: [],
   maxParallel: 0,
+  hiddenLanes: [],
   tabs: [],
   active: null,
   panelOpen: false,
@@ -55,6 +56,9 @@ function fmtWake(at) {
   return d.toDateString() === new Date().toDateString() ? hm : pad(d.getDate()) + '/' + pad(d.getMonth() + 1) + ' ' + hm
 }
 const untilText = (at) => (at - Date.now() > 30_000 ? T('wake.in', { t: fmtElapsed(at - Date.now()) }) : T('wake.due'))
+/** A card that finished a moment ago keeps a soft glow, so you notice what just completed. */
+const FRESH_MS = 5 * 60_000
+const isFresh = (t) => t.state === 'done' && Date.now() - t.since < FRESH_MS
 const isScheduled = (t) => t.state === 'queued' && !!t.wakeAt
 
 function timer(t) {
@@ -239,6 +243,7 @@ function updateCard(el, t) {
     el.setAttribute('aria-label', t.title + ', ' + stateLabel(t.state) + ', ' + agentName(t.agent) + '. ' + T('card.hint'))
   }
   el.classList.toggle('is-open', S.panelOpen && S.active === t.id)
+  el.classList.toggle('card--fresh', isFresh(t))
   const last = lastText(t)
   const lastEl = el.querySelector('[data-el="last"]')
   if (lastEl && lastEl.textContent !== last) lastEl.textContent = last
@@ -325,7 +330,7 @@ function render(opts = {}) {
     const n = S.tasks.filter((t) => t.state === 'running' && listKey(t) === 'running:' + a).length
     const lane = $('[data-lane="' + a + '"]')
     lane.classList.toggle('is-busy', n > 0)
-    if (a === 'other') lane.hidden = n === 0
+    lane.hidden = a === 'other' ? n === 0 : n === 0 && S.hiddenLanes.includes(a)
     const subs = S.tasks.filter((t) => t.state === 'running' && listKey(t) === 'running:' + a).reduce((k, t) => k + runningSubs(t).length, 0)
     $('[data-lane-status="' + a + '"]').textContent = n ? T('lane.busy', { n }) + (subs ? ' · ' + T('sub.short', { n: subs }) : '') : T('lane.idle')
   }
@@ -677,6 +682,7 @@ function toggleMic() {
 function apply(state, opts = {}) {
   if (state.language && state.language !== LANG) setLang(state.language)
   S.tasks = state.tasks
+  S.hiddenLanes = state.hiddenLanes || []
   if (state.targets) { S.targets = state.targets; S.maxParallel = state.maxParallel; renderTargets(state) }
   render(opts)
 }
@@ -793,6 +799,7 @@ setInterval(() => {
   // only live timers move; frozen ones (done, waiting) are left as they are
   for (const [id, el] of cards) {
     const t = byId(id)
+    if (t && t.state === 'done') { el.classList.toggle('card--fresh', isFresh(t)); continue }
     if (!t || (t.state !== 'running' && t.state !== 'queued')) continue
     const time = el.querySelector('[data-el="time"]')
     if (time) time.textContent = timer(t).text

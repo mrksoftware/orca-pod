@@ -317,6 +317,8 @@ html.light .card, html.light .detail { --pc-s: 70%; --pc-l: 36%; }
 .card--done .c-title { font-size: 13px; line-height: 17px; -webkit-line-clamp: 1; color: var(--muted); }
 .card--done .c-meta { font-size: 11px; }
 .card--done .c-last { display: none; }
+.card--fresh { border-color: color-mix(in srgb, var(--lime) 40%, var(--line)); animation: fresh 3.6s ease-in-out infinite; }
+@keyframes fresh { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--lime) 18%, transparent), 0 0 14px -3px color-mix(in srgb, var(--lime) 35%, transparent); } }
 .ck { width: 16px; height: 16px; border-radius: 50%; background: var(--lime); display: inline-flex; align-items: center; justify-content: center; flex: none; animation: pop .35s cubic-bezier(.34,1.56,.64,1) both; }
 .ck svg { width: 12px; height: 12px; fill: none; stroke: var(--on-lime); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 .ck path { stroke-dasharray: 20; stroke-dashoffset: 20; animation: draw .45s .2s ease-out forwards; }
@@ -487,5 +489,6 @@ html.light .card, html.light .detail { --pc-s: 70%; --pc-l: 36%; }
   .aq *, .aq *::before, .aq *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
   .card--running { background: linear-gradient(var(--sunk), var(--sunk)) padding-box, linear-gradient(var(--data), var(--data)) border-box; }
   .card--waiting { box-shadow: 0 0 0 3px var(--amber-glow); }
+  .card--fresh { box-shadow: 0 0 10px -3px color-mix(in srgb, var(--lime) 35%, transparent); }
   .ibar::after { width: 100%; opacity: 0.5; }
 }

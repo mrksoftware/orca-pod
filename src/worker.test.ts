@@ -1,7 +1,7 @@
 // Runs src/worker.ts's activate(orca) over a mock Orca host.
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import * as main from './worker'
-import { claudeProjectDir, cleanLines, columnFor, describeTool, detectLimit, nextCron, nextWake, readActivity, readSubagents, sessionDirFor, setOrcaRunner, slug, tabTitle } from './worker'
+import { claudeProjectDir, cleanLines, columnFor, describeTool, detectLimit, nextCron, nextWake, turnEnded, readActivity, readSubagents, sessionDirFor, setOrcaRunner, slug, tabTitle } from './worker'
 
 // launches run in the background (void launch): give them time to finish, also on a busy machine
 const settle = () => new Promise((r) => setTimeout(r, 150))
@@ -163,8 +163,34 @@ test('finds the next wake-up of a looping or scheduled session', () => {
   assert.equal(w?.kind, 'cron')
   assert.equal(w?.at, Date.parse('2026-11-25T13:15:00Z'))
   assert.equal(nextWake([created, tool('2026-11-25T09:30:00Z', 'CronDelete', { id: 'job1' })], now), null)
+  // a recurring job: the result only says "Every 30 minutes", the cron is in the CronCreate call
+  const rec = [
+    L({ timestamp: '2026-11-25T09:00:00Z', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'CronCreate', input: { cron: '*/30 * * * *', recurring: true } }] } }),
+    L({ timestamp: '2026-11-25T09:00:01Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: 'ok' }] }, toolUseResult: { id: 'job2', humanSchedule: 'Every 30 minutes', recurring: true, nextFireAt: Date.parse('2026-11-25T09:30:00Z') } }),
+  ]
+  w = nextWake(rec, now)
+  assert.equal(w?.kind, 'cron')
+  assert.ok(w && w.at >= now && w.at <= now + 30 * 60_000)
+  // Claude shifts a recurring job off its cron slot: fires at :13:20 and :43:20, not :00 and :30
+  const shiftedJob = [
+    L({ timestamp: '2026-11-25T09:35:08Z', message: { content: [{ type: 'tool_use', id: 'tu2', name: 'CronCreate', input: { cron: '*/30 * * * *', recurring: true } }] } }),
+    L({ timestamp: '2026-11-25T09:35:12Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu2', content: 'ok' }] }, toolUseResult: { id: 'job3', humanSchedule: 'Every 30 minutes', recurring: true, nextFireAt: Date.parse('2026-11-25T10:13:20Z') } }),
+  ]
+  assert.equal(nextWake(shiftedJob, Date.parse('2026-11-25T10:50:00Z'))?.at, Date.parse('2026-11-25T11:13:20Z'))
+  assert.equal(nextWake(shiftedJob, Date.parse('2026-11-25T10:13:10Z'))?.at, Date.parse('2026-11-25T10:13:20Z'))
+  assert.equal(nextWake(shiftedJob, Date.parse('2026-11-25T10:13:30Z'))?.at, Date.parse('2026-11-25T10:43:20Z'))
   // a one-shot whose time has passed has fired
   assert.equal(nextWake([created], Date.parse('2026-11-25T14:00:00Z')), null)
+})
+
+test('turnEnded: the last turn is over once turn_duration follows the last message', () => {
+  const j = (o: unknown) => JSON.stringify(o)
+  const msg = j({ type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] } })
+  const end = j({ type: 'system', subtype: 'turn_duration' })
+  const noise = j({ type: 'attachment' })
+  assert.equal(turnEnded([msg, end, noise]), true)
+  assert.equal(turnEnded([end, msg, noise]), false)
+  assert.equal(turnEnded([]), false)
 })
 
 test("Orca automations wait in Queued for their next run; they are never launched by Pod", async () => {

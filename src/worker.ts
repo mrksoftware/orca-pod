@@ -334,12 +334,17 @@ export function nextCron(expr: string, from: number): number | null {
   return null
 }
 
+const shifted = (t: number | null, by: number) => (t === null ? null : t + by)
+
 /** The next self-scheduled wake-up of a Claude session, from its transcript lines: a dynamic loop
  *  (ScheduleWakeup: its time plus delaySeconds, `stop` ends it) or a cron job (CronCreate, until
  *  CronDelete or, for a one-shot, until it fired). Earliest upcoming, or null. */
 export function nextWake(lines: string[], now = Date.now()): Wake | null {
   let loop: Wake | null = null
-  const jobs = new Map<string, { cron: string; recurring: boolean; next: number | null }>()
+  const jobs = new Map<string, { cron: string; recurring: boolean; next: number | null; offset: number }>()
+  // CronCreate's result only has a human-readable schedule ("Every 30 minutes"); the cron
+  // expression is in the tool call, so remember it by tool_use id until the result shows up.
+  const crons = new Map<string, string>()
   for (const raw of lines) {
     if (!raw.includes('ScheduleWakeup') && !raw.includes('Cron') && !raw.includes('nextFireAt')) continue
     let o: { timestamp?: string; message?: { content?: unknown }; toolUseResult?: { id?: string; humanSchedule?: string; recurring?: boolean; nextFireAt?: number } }
@@ -350,12 +355,21 @@ export function nextWake(lines: string[], now = Date.now()): Wake | null {
     }
     const ts = o.timestamp ? Date.parse(o.timestamp) : now
     const r = o.toolUseResult
-    if (r && r.id && r.humanSchedule) jobs.set(r.id, { cron: r.humanSchedule, recurring: !!r.recurring, next: r.nextFireAt ?? null })
     const content = o.message?.content
+    if (r && r.id && r.humanSchedule) {
+      const res = Array.isArray(content) ? (content as { type?: string; tool_use_id?: string }[]).find((c) => c.type === 'tool_result') : undefined
+      const cron = (res?.tool_use_id && crons.get(res.tool_use_id)) || r.humanSchedule
+      // Claude shifts a job's fire time off the cron slot (`*/30` fires at :13:20 and :43:20, not at
+      // :00 and :30). The first fire it reports tells us that shift; later fires keep it.
+      const slot = r.recurring && r.nextFireAt ? nextCron(cron, ts) : null
+      const shift = slot !== null && r.nextFireAt ? Math.round(r.nextFireAt) - slot : 0
+      jobs.set(r.id, { cron, recurring: !!r.recurring, next: r.nextFireAt ?? null, offset: shift > 0 && shift < 3_600_000 ? shift : 0 })
+    }
     if (!Array.isArray(content)) continue
-    for (const c of content as { type?: string; name?: string; input?: Record<string, unknown> }[]) {
+    for (const c of content as { type?: string; id?: string; name?: string; input?: Record<string, unknown> }[]) {
       if (c.type !== 'tool_use') continue
-      if (c.name === 'ScheduleWakeup') {
+      if (c.name === 'CronCreate' && c.id && typeof c.input?.cron === 'string') crons.set(c.id, c.input.cron)
+      else if (c.name === 'ScheduleWakeup') {
         const stop = c.input?.stop === true
         const delay = Number(c.input?.delaySeconds)
         loop = stop || !Number.isFinite(delay) ? null : { at: ts + delay * 1000, kind: 'loop', label: String(c.input?.reason ?? '').slice(0, 120) }
@@ -365,10 +379,29 @@ export function nextWake(lines: string[], now = Date.now()): Wake | null {
   let best: Wake | null = loop && loop.at > now - 60_000 ? loop : null
   for (const j of jobs.values()) {
     let at = j.next
-    if (j.recurring || at === null || at < now - 60_000) at = j.recurring ? nextCron(j.cron, now) : at !== null && at >= now - 60_000 ? at : null
+    if (j.recurring || at === null || at < now - 60_000) at = j.recurring ? shifted(nextCron(j.cron, now - j.offset), j.offset) : at !== null && at >= now - 60_000 ? at : null
     if (at !== null && (!best || at < best.at)) best = { at, kind: 'cron', label: j.cron }
   }
   return best
+}
+
+/** True when the session's last turn is over: its `turn_duration` marker comes after the last
+ *  user or assistant message. Orca can keep reporting such a session as working. */
+export function turnEnded(lines: string[]): boolean {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const raw = lines[i]
+    const isTurn = raw.includes('"turn_duration"')
+    if (!isTurn && !raw.includes('"type":"user"') && !raw.includes('"type":"assistant"')) continue
+    try {
+      const o = JSON.parse(raw) as { type?: string; subtype?: string; isSidechain?: boolean }
+      if (o.isSidechain) continue
+      if (o.type === 'system' && o.subtype === 'turn_duration') return true
+      if (o.type === 'user' || o.type === 'assistant') return false
+    } catch {
+      continue
+    }
+  }
+  return false
 }
 
 /** The transcript's last lines (up to `bytes`), for schedule scanning. */
@@ -566,7 +599,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     const defaultAgent = typeof s.defaultAgent === 'string' ? s.defaultAgent : 'claude'
     const showOrcaAgents = s.showOrcaAgents !== false
     const language = typeof s.language === 'string' && (LANGS as string[]).includes(s.language) ? s.language : 'en'
-    return { maxParallel, doneVisible, defaultAgent, showOrcaAgents, language }
+    const hiddenLanes = ['claude', 'codex'].filter((a) => s['show' + a.charAt(0).toUpperCase() + a.slice(1) + 'Lane'] === false)
+    return { maxParallel, doneVisible, defaultAgent, showOrcaAgents, language, hiddenLanes }
   }
 
   /** Every place a task can run: Git projects (new worktree), folder projects and bots (their
@@ -618,6 +652,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       defaultTargetId: typeof last === 'string' && ts.some((t) => t.id === last) ? last : (ts[0]?.id ?? null),
       maxParallel: s.maxParallel,
       language: s.language,
+      hiddenLanes: s.hiddenLanes,
     }
   }
 
@@ -738,6 +773,16 @@ export default function activate(orca: OrcaWorkerApi): void {
     return nextWake(await tailLines(dir + '.jsonl'))
   }
 
+  /** The transcript has been quiet for a while and its last turn is over. */
+  async function asleep(file: string): Promise<boolean> {
+    try {
+      if (Date.now() - (await stat(file)).mtimeMs < 20_000) return false
+    } catch {
+      return false
+    }
+    return turnEnded(await tailLines(file, 256 * 1024))
+  }
+
   /** Orca automations on the board: each enabled one waits in Queued for its next run. */
   let automationsAt = 0
   async function syncAutomations(): Promise<boolean> {
@@ -833,7 +878,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const ws = await workspaces()
     let changed = false
     for (const t of tasks) {
-      const active = t.state === 'running' || t.state === 'waiting'
+      const active = t.state === 'running' || t.state === 'waiting' || (t.state === 'queued' && !!t.wakeAt && t.wakeKind !== 'automation')
       // a done card is read once, only to learn what it was asked (for a generic title)
       const once = t.state === 'done' && !t.prompt && !deepRead.has(t.id)
       if ((!active && !once) || t.agent !== 'claude') continue
@@ -857,6 +902,29 @@ export default function activate(orca: OrcaWorkerApi): void {
       if (prev !== next) {
         t.subagents = subs.length ? subs : undefined
         changed = true
+      }
+      // Sub-agents still running in the background: the session is busy even if its own turn ended.
+      const busy = subs.some((x) => x.running)
+      if (t.state === 'queued') {
+        if (busy) {
+          t.wakeAt = t.wakeKind = t.wakeLabel = undefined
+          move(t, 'running')
+          changed = true
+        }
+        continue
+      }
+      // Orca still says working, but the turn is over and a wake-up is scheduled: it is sleeping.
+      if (!busy && t.state === 'running' && !t.awaitPickup && (await asleep(dir + '.jsonl'))) {
+        const w = await scheduleFor(t)
+        if (w) {
+          t.wakeAt = w.at
+          t.wakeKind = w.kind
+          t.wakeLabel = w.label
+          t.activity = undefined
+          move(t, 'queued', tr(w.kind === 'loop' ? 'note.loop' : 'note.cron'))
+          changed = true
+          continue
+        }
       }
       // What it is doing now, and what it was asked last
       let act = await readActivity(dir + '.jsonl')
@@ -1245,6 +1313,17 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (ids?.sessionId && !t.sessionId) t.sessionId = ids.sessionId
     let col = columnFor(state)
     if (t.error) return false
+    // Orca may keep reporting `working` for a session whose turn already ended (it sleeps until a
+    // loop or cron job fires). A state older than the move to Queued is that stale report.
+    if (col === 'running' && t.state === 'queued' && t.wakeAt && at && at <= t.since) {
+      // while it sleeps, keep the shown time in line with the transcript
+      const w = t.agent === 'claude' && t.wakeKind !== 'automation' ? await scheduleFor(t) : null
+      if (!w || (w.at === t.wakeAt && w.kind === t.wakeKind)) return false
+      t.wakeAt = w.at
+      t.wakeKind = w.kind
+      t.wakeLabel = w.label
+      return true
+    }
     // Still idle before its scheduled wake-up: nothing to re-read yet.
     if (col === 'done' && t.state === 'queued' && t.wakeAt && Date.now() < t.wakeAt + 60_000) return false
     // An agent stopped by its usage limit is not done: it waits for the limit to reset (or for
