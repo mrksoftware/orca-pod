@@ -683,6 +683,7 @@ function apply(state, opts = {}) {
   if (state.language && state.language !== LANG) setLang(state.language)
   S.tasks = state.tasks
   S.hiddenLanes = state.hiddenLanes || []
+  if (state.agents) for (const o of $('#aq-agent').options) o.hidden = o.disabled = !state.agents.includes(o.value)
   if (state.targets) { S.targets = state.targets; S.maxParallel = state.maxParallel; renderTargets(state) }
   render(opts)
 }

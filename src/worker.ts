@@ -643,8 +643,19 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   const plain = () => JSON.parse(JSON.stringify(tasks)) as Task[]
 
+  /** The agent CLIs installed on this machine (`orca agent installed`), or null when unknown. */
+  let installedAt = 0
+  let installed: Set<string> | null = null
+  async function installedAgents(): Promise<Set<string> | null> {
+    if (Date.now() - installedAt < 60_000) return installed
+    installedAt = Date.now()
+    const r = (await runOrca(['agent', 'installed']).catch(() => null)) as { agents?: { id?: string }[] } | null
+    installed = Array.isArray(r?.agents) && r.agents.length ? new Set(r.agents.map((a) => String(a.id))) : null
+    return installed
+  }
+
   async function snapshot(): Promise<PodState> {
-    const [s, ts, last] = await Promise.all([settings(), targets(), orca.storage.get(LAST_TARGET)])
+    const [s, ts, last, inst] = await Promise.all([settings(), targets(), orca.storage.get(LAST_TARGET), installedAgents()])
     return {
       tasks: plain(),
       targets: ts,
@@ -652,7 +663,8 @@ export default function activate(orca: OrcaWorkerApi): void {
       defaultTargetId: typeof last === 'string' && ts.some((t) => t.id === last) ? last : (ts[0]?.id ?? null),
       maxParallel: s.maxParallel,
       language: s.language,
-      hiddenLanes: s.hiddenLanes,
+      hiddenLanes: [...new Set([...s.hiddenLanes, ...(inst ? ['claude', 'codex'].filter((a) => !inst.has(a)) : [])])],
+      agents: inst ? ['claude', 'codex'].filter((a) => inst.has(a)) : null,
     }
   }
 

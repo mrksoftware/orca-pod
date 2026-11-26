@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "pod",
   "name": "Pod",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": { "name": "mrksoftware", "url": "https://github.com/mrksoftware" },
   "repository": "https://github.com/mrksoftware/orca-pod",
   "homepage": "https://github.com/mrksoftware/orca-pod",
@@ -82,14 +82,14 @@
       {
         "key": "showClaudeLane",
         "title": "Show Claude in Running",
-        "description": "Show Claude's lane in the Running column. Turn off if you do not use it on this machine; it still appears while a Claude task is running.",
+        "description": "Show Claude's lane in the Running column. Hidden automatically when the agent is not installed on this machine; turn off to hide it anyway. It still appears while a Claude task is running.",
         "type": "boolean",
         "default": true
       },
       {
         "key": "showCodexLane",
         "title": "Show Codex in Running",
-        "description": "Show Codex's lane in the Running column. Turn off if you do not use it on this machine; it still appears while a Codex task is running.",
+        "description": "Show Codex's lane in the Running column. Hidden automatically when the agent is not installed on this machine; turn off to hide it anyway. It still appears while a Codex task is running.",
         "type": "boolean",
         "default": true
       },
