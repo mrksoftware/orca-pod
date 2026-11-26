@@ -51,7 +51,7 @@ export type Task = {
   /** Set while the task waits for a scheduled run: back in Queued until then. `loop` and `cron`
    *  are a Claude session's own wake-ups, `automation` an Orca automation's next run. */
   wakeAt?: number
-  wakeKind?: 'loop' | 'cron' | 'automation'
+  wakeKind?: 'loop' | 'cron' | 'automation' | 'limit'
   /** The cron expression, the automation's schedule, or the loop's reason. */
   wakeLabel?: string
   /** The title of the agent's tab in Orca (Claude names its session), kept up to date. */
@@ -62,7 +62,7 @@ export type Task = {
   prompt?: string
   /** Claude sub-agents of this session's current work (read from Claude's transcripts on disk). */
   subagents?: SubAgent[]
-  /** Set while the agent is stopped by its usage limit: the reset time it gave, or ''. */
+  /** Set while the agent is stopped by its usage limit (it waits in Queued, `wakeAt` is the reset): the reset time it gave, or ''. */
   limit?: string
   /** Why the launch failed. */
   error?: string

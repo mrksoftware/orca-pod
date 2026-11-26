@@ -59,6 +59,7 @@ const untilText = (at) => (at - Date.now() > 30_000 ? T('wake.in', { t: fmtElaps
 /** A card that finished a moment ago keeps a soft glow, so you notice what just completed. */
 const FRESH_MS = 5 * 60_000
 const isFresh = (t) => t.state === 'done' && Date.now() - t.since < FRESH_MS
+const isLimited = (t) => t.limit !== undefined && (t.state === 'queued' || t.state === 'waiting')
 const isScheduled = (t) => t.state === 'queued' && !!t.wakeAt
 
 function timer(t) {
@@ -203,7 +204,9 @@ function cardInner(t) {
   const lead = t.state === 'running'
     ? '<span class="c-orb' + (orbAgent ? ' c-orb--' + orbAgent : '') + '" aria-hidden="true">' + (orbAgent ? logo(orbAgent) : IC.bot) + '</span>'
     : t.state === 'done' ? IC.check : ''
-  const badge = isScheduled(t)
+  const badge = isLimited(t) && !err
+    ? '<span class="badge badge--limit" title="' + esc(t.limit ? T('limit.resets', { t: t.limit }) : T('badge.limit')) + '">' + IC.hourglass + (t.limit ? esc(t.limit) : T('badge.limit')) + '</span>'
+    : isScheduled(t)
     ? '<span class="badge badge--wake" title="' + esc(T('wake.' + (t.wakeKind || 'cron')) + (t.wakeLabel ? ': ' + t.wakeLabel : '')) + '">' + IC.alarm + esc(fmtWake(t.wakeAt)) + '</span>'
     : t.state === 'waiting'
     ? t.limit !== undefined && !err
@@ -226,6 +229,7 @@ function cardInner(t) {
 }
 
 function lastText(t) {
+  if (isLimited(t)) return t.question || t.last || ''
   if (isScheduled(t)) return T('wake.next', { kind: T('wake.' + (t.wakeKind || 'cron')), at: fmtWake(t.wakeAt), in: untilText(t.wakeAt) })
   if (t.state === 'waiting') return t.question || t.last || ''
   // running: what it is doing right now, when its transcript says
@@ -237,7 +241,7 @@ function updateCard(el, t) {
   const sig = cardSig(t)
   if (el._sig !== sig) {
     el._sig = sig
-    el.className = 'card card--' + t.state + (isError(t) ? ' card--error' : t.state === 'waiting' && t.limit !== undefined ? ' card--limit' : isScheduled(t) ? ' card--scheduled' : '')
+    el.className = 'card card--' + t.state + (isError(t) ? ' card--error' : isLimited(t) ? ' card--limit' : isScheduled(t) ? ' card--scheduled' : '')
     el.style.setProperty('--ph', String(placeHue(t.projectName)))
     el.innerHTML = cardInner(t)
     el.setAttribute('aria-label', t.title + ', ' + stateLabel(t.state) + ', ' + agentName(t.agent) + '. ' + T('card.hint'))
@@ -470,7 +474,7 @@ function renderPanel() {
   const err = isError(t)
   const pill = $('#d-pill')
   pill.className = 'pill pill--' + t.state
-  pill.textContent = err ? T('badge.error') : t.state === 'waiting' && t.limit !== undefined ? T('badge.limit') : stateLabel(t.state)
+  pill.textContent = err ? T('badge.error') : isLimited(t) ? T('badge.limit') : stateLabel(t.state)
   $('#d-title').textContent = displayTitle(t)
   const lastAsk = askText(t)
   $('#d-ask-now').hidden = !lastAsk && !(t.state === 'running' && t.activity)

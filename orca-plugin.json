@@ -3,7 +3,7 @@
   "manifestVersion": 2,
   "id": "pod",
   "name": "Pod",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": { "name": "mrksoftware", "url": "https://github.com/mrksoftware" },
   "repository": "https://github.com/mrksoftware/orca-pod",
   "homepage": "https://github.com/mrksoftware/orca-pod",

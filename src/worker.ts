@@ -274,6 +274,23 @@ const oneLine = (s: unknown, n = 90) => {
   return t.length > n ? t.slice(0, n - 1) + '…' : t
 }
 
+/** When a limit message's reset time ("7pm", "3:30pm (Europe/Rome)", "19:00") next comes, in local
+ *  time, or undefined when it is not a plain time of day (a date, nothing). */
+export function parseReset(text: string, now = Date.now()): number | undefined {
+  const m = /^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i.exec(text)
+  if (!m) return undefined
+  let h = Number(m[1])
+  const min = Number(m[2] ?? 0)
+  const ap = m[3]?.toLowerCase()
+  if (ap === 'pm' && h < 12) h += 12
+  if (ap === 'am' && h === 12) h = 0
+  if (h > 23 || min > 59 || (!ap && !m[2])) return undefined
+  const d = new Date(now)
+  d.setHours(h, min, 0, 0)
+  if (d.getTime() <= now) d.setDate(d.getDate() + 1)
+  return d.getTime()
+}
+
 /* ---------- schedules: Claude loops and cron jobs ---------- */
 
 /** The next time (ms) at or after `from` that a 5-field cron expression fires (minute hour
@@ -785,14 +802,35 @@ export default function activate(orca: OrcaWorkerApi): void {
     return nextWake(await tailLines(dir + '.jsonl'))
   }
 
-  /** The transcript has been quiet for a while and its last turn is over. */
-  async function asleep(file: string): Promise<boolean> {
+  /** Nothing was written to the transcript for `ms`. */
+  async function quietFor(file: string, ms: number): Promise<boolean> {
     try {
-      if (Date.now() - (await stat(file)).mtimeMs < 20_000) return false
+      return Date.now() - (await stat(file)).mtimeMs >= ms
     } catch {
       return false
     }
-    return turnEnded(await tailLines(file, 256 * 1024))
+  }
+
+  /** The transcript has been quiet for a while and its last turn is over. */
+  async function asleep(file: string): Promise<boolean> {
+    return (await quietFor(file, 20_000)) && turnEnded(await tailLines(file, 256 * 1024))
+  }
+
+  /** The agent stopped on its usage limit: back to Queued until the limit resets. */
+  function parkOnLimit(t: Task, lim: string): boolean {
+    const fresh = t.limit === undefined || t.state !== 'queued'
+    t.limit = lim
+    t.awaitPickup = false
+    t.activity = undefined
+    t.wakeAt = parseReset(lim)
+    t.wakeKind = 'limit'
+    t.wakeLabel = lim
+    t.question = lim ? tr('limit.q', { reset: lim }) : tr('limit.qNoReset')
+    t.last = t.question
+    if (!fresh) return false
+    move(t, 'queued', tr('note.limit'))
+    void orca.host.call('notifications.show', { title: 'Pod: ' + t.title, body: t.question }).catch(() => undefined)
+    return true
   }
 
   /** Orca automations on the board: each enabled one waits in Queued for its next run. */
@@ -890,7 +928,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const ws = await workspaces()
     let changed = false
     for (const t of tasks) {
-      const active = t.state === 'running' || t.state === 'waiting' || (t.state === 'queued' && !!t.wakeAt && t.wakeKind !== 'automation')
+      const active = t.state === 'running' || t.state === 'waiting' || (t.state === 'queued' && (!!t.wakeAt || t.limit !== undefined) && t.wakeKind !== 'automation')
       // a done card is read once, only to learn what it was asked (for a generic title)
       const once = t.state === 'done' && !t.prompt && !deepRead.has(t.id)
       if ((!active && !once) || t.agent !== 'claude') continue
@@ -918,12 +956,23 @@ export default function activate(orca: OrcaWorkerApi): void {
       // Sub-agents still running in the background: the session is busy even if its own turn ended.
       const busy = subs.some((x) => x.running)
       if (t.state === 'queued') {
-        if (busy) {
-          t.wakeAt = t.wakeKind = t.wakeLabel = undefined
+        // It works again: sub-agents running, or (after a usage limit) writes to its transcript
+        const resumed = t.limit !== undefined && !(await quietFor(dir + '.jsonl', Date.now() - t.since - 30_000))
+        if (busy || resumed) {
+          t.wakeAt = t.wakeKind = t.wakeLabel = t.limit = undefined
           move(t, 'running')
           changed = true
         }
         continue
+      }
+      // Stopped by the usage limit while Orca still says working (a scheduled run that failed):
+      // the terminal says so.
+      if (!busy && t.state === 'running' && !t.awaitPickup && t.terminalId && (await quietFor(dir + '.jsonl', 60_000))) {
+        const lim = detectLimit((await readTail(t, 40)).slice(-8).join('\n'))
+        if (lim !== null) {
+          changed = parkOnLimit(t, lim) || changed
+          continue
+        }
       }
       // Orca still says working, but the turn is over and a wake-up is scheduled: it is sleeping.
       if (!busy && t.state === 'running' && !t.awaitPickup && (await asleep(dir + '.jsonl'))) {
@@ -1019,7 +1068,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const running = tasks.filter((t) => t.state === 'running' && t.source !== 'orca').length
     let room = maxParallel > 0 ? maxParallel - running : Infinity
     // only Pod's own tasks waiting for a slot; scheduled ones start by themselves
-    const queue = tasks.filter((t) => t.state === 'queued' && t.source === 'pod' && !t.wakeAt).sort((a, b) => a.createdAt - b.createdAt)
+    const queue = tasks.filter((t) => t.state === 'queued' && t.source === 'pod' && !t.wakeAt && t.limit === undefined).sort((a, b) => a.createdAt - b.createdAt)
     for (const t of queue) {
       if (room <= 0) break
       room -= 1
@@ -1327,9 +1376,9 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (t.error) return false
     // Orca may keep reporting `working` for a session whose turn already ended (it sleeps until a
     // loop or cron job fires). A state older than the move to Queued is that stale report.
-    if (col === 'running' && t.state === 'queued' && t.wakeAt && at && at <= t.since) {
+    if (col === 'running' && t.state === 'queued' && (t.wakeAt || t.limit !== undefined) && at && at <= t.since) {
       // while it sleeps, keep the shown time in line with the transcript
-      const w = t.agent === 'claude' && t.wakeKind !== 'automation' ? await scheduleFor(t) : null
+      const w = t.agent === 'claude' && (t.wakeKind === 'loop' || t.wakeKind === 'cron') ? await scheduleFor(t) : null
       if (!w || (w.at === t.wakeAt && w.kind === t.wakeKind)) return false
       t.wakeAt = w.at
       t.wakeKind = w.kind
@@ -1345,15 +1394,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     } else {
       const lim = await limitHit(t)
       if (lim !== null) {
-        const fresh = t.limit === undefined || t.state !== 'waiting'
-        t.limit = lim
-        t.awaitPickup = false
-        t.question = lim ? tr('limit.q', { reset: lim }) : tr('limit.qNoReset')
-        t.last = t.question
-        if (!fresh) return false
-        move(t, 'waiting', tr('note.limit'))
-        void orca.host.call('notifications.show', { title: 'Pod: ' + t.title, body: t.question }).catch(() => undefined)
-        return true
+        return parkOnLimit(t, lim)
       }
       if (t.limit !== undefined) t.limit = undefined
     }
@@ -1444,7 +1485,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   async function reconcile(): Promise<boolean> {
     let changed = false
     for (const t of [...tasks]) {
-      if (!t.workspaceId || t.error || (t.state === 'queued' && !t.wakeAt) || t.wakeKind === 'automation') continue
+      if (!t.workspaceId || t.error || (t.state === 'queued' && !t.wakeAt && t.limit === undefined) || t.wakeKind === 'automation') continue
       if (t.state === 'done' && t.last) continue
       const agents = await agentsIn(t.workspaceId)
       if (agents) {

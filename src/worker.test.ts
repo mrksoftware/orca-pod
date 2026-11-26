@@ -1,7 +1,7 @@
 // Runs src/worker.ts's activate(orca) over a mock Orca host.
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import * as main from './worker'
-import { claudeProjectDir, cleanLines, columnFor, describeTool, detectLimit, nextCron, nextWake, turnEnded, readActivity, readSubagents, sessionDirFor, setOrcaRunner, slug, tabTitle } from './worker'
+import { claudeProjectDir, cleanLines, columnFor, describeTool, detectLimit, nextCron, nextWake, parseReset, turnEnded, readActivity, readSubagents, sessionDirFor, setOrcaRunner, slug, tabTitle } from './worker'
 
 // launches run in the background (void launch): give them time to finish, also on a busy machine
 const settle = () => new Promise((r) => setTimeout(r, 150))
@@ -45,7 +45,7 @@ test('recognises usage-limit messages and their reset time', () => {
   assert.equal(detectLimit('The lime line resets only when the goal changes'), null)
 })
 
-test('an agent stopped by the usage limit waits for you instead of looking done', async () => {
+test('an agent stopped by the usage limit waits in Queued until it resets instead of looking done', async () => {
   const h = host({ 'terminal.read': { lines: ['Working on it', "You've hit your limit · resets 7pm"], truncated: false } }, 0)
   const w = await mountWorker(main, { host: h })
   await w.request('pod.add', { title: 'fai una cosa', targetId: 'p:p1' })
@@ -53,10 +53,16 @@ test('an agent stopped by the usage limit waits for you instead of looking done'
   // even right after launch, when an idle report is otherwise ignored
   await w.emit('agent.status.changed', { workspaceId: 'ws1', paneKey: 'a:b', terminalId: 'term1', state: 'done', receivedAt: Date.now() })
   let s = await w.request('pod.state')
-  assert.equal(s.tasks[0].state, 'waiting')
+  assert.equal(s.tasks[0].state, 'queued')
   assert.equal(s.tasks[0].limit, '7pm')
-  // working again clears it
-  await w.emit('agent.status.changed', { workspaceId: 'ws1', paneKey: 'a:b', terminalId: 'term1', state: 'working', receivedAt: Date.now() })
+  assert.equal(s.tasks[0].wakeKind, 'limit')
+  assert.ok(s.tasks[0].wakeAt && s.tasks[0].wakeAt > Date.now())
+  // a stale "working" report from before it was parked changes nothing
+  await w.emit('agent.status.changed', { workspaceId: 'ws1', paneKey: 'a:b', terminalId: 'term1', state: 'working', receivedAt: Date.now() - 5000 })
+  s = await w.request('pod.state')
+  assert.equal(s.tasks[0].state, 'queued')
+  // working again (a new report) clears it
+  await w.emit('agent.status.changed', { workspaceId: 'ws1', paneKey: 'a:b', terminalId: 'term1', state: 'working', receivedAt: Date.now() + 1000 })
   s = await w.request('pod.state')
   assert.equal(s.tasks[0].state, 'running')
   assert.equal(s.tasks[0].limit, undefined)
@@ -181,6 +187,15 @@ test('finds the next wake-up of a looping or scheduled session', () => {
   assert.equal(nextWake(shiftedJob, Date.parse('2026-11-25T10:13:30Z'))?.at, Date.parse('2026-11-25T10:43:20Z'))
   // a one-shot whose time has passed has fired
   assert.equal(nextWake([created], Date.parse('2026-11-25T14:00:00Z')), null)
+})
+
+test('parseReset: the next time of day a limit message names', () => {
+  const now = new Date(2026, 10, 26, 16, 40).getTime()
+  assert.equal(parseReset('7pm (Europe/Rome)', now), new Date(2026, 10, 26, 19, 0).getTime())
+  assert.equal(parseReset('3:30pm', now), new Date(2026, 10, 27, 15, 30).getTime())
+  assert.equal(parseReset('12am', now), new Date(2026, 10, 27, 0, 0).getTime())
+  assert.equal(parseReset('Nov 25 at 9am', now), undefined)
+  assert.equal(parseReset('', now), undefined)
 })
 
 test('turnEnded: the last turn is over once turn_duration follows the last message', () => {
